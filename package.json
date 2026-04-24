@@ -1,0 +1,40 @@
+{
+  "name": "self-learning-genius-agent",
+  "version": "1.0.0",
+  "description": "Production-ready self-improvement loop for AI agents: auto-detect errors, extract learnings, promote to memory",
+  "main": "self-improvement/handler.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "keywords": [
+    "agent",
+    "self-improvement",
+    "learning",
+    "error-detection",
+    "memory",
+    "openclaw"
+  ],
+  "author": "Your Name",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "eslint": "^8.0.0",
+    "prettier": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/self-learning-genius-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/self-learning-genius-agent/issues"
+  },
+  "homepage": "https://github.com/yourusername/self-learning-genius-agent#readme"
+}

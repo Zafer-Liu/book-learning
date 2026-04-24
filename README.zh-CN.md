@@ -1,0 +1,397 @@
+# Agent 自动学习系统（Auto-Learning System）
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933.svg?logo=node.js&logoColor=white)](#)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?logo=typescript&logoColor=white)](#)
+[![OpenClaw](https://img.shields.io/badge/Agent_Runtime-OpenClaw-6E56CF.svg)](#)
+[![Hook](https://img.shields.io/badge/Bootstrap_Hook-v4.1-8A2BE2.svg)](#)
+[![License](https://img.shields.io/badge/License-GPL--3.0-yellow.svg)](./LICENSE)
+[![Status](https://img.shields.io/badge/Status-Active-success.svg)](#)
+> **中文**：面向 AI Agent 的自动学习系统：启动检测错误、定时提升经验、持续沉淀行为记忆。  
+> **English**: A self-improvement system for AI agents: detect errors at bootstrap, promote learnings on schedule, and accumulate durable behavioral memory.
+> - 在启动阶段自动检测错误信号
+> - 将结构化错误写入 `ERRORS.md`
+> - 将可复用经验提升到 `LEARNINGS.md` / `MEMORY.md`
+> - 内建幂等、去重、冷却、归档与安全写入机制
+
+---
+
+[English Documentation (README.md)](./README.md)
+
+---
+
+## 为什么需要这个项目
+
+Agent 往往会在不同会话中重复犯同类错误。  
+本项目将运行时失败与用户纠正沉淀为可持续复用的操作知识。
+
+**目标：** 让系统形成“错误 → 提取 → 学习 → 记忆”的持续进化闭环。
+
+---
+
+## 工作流总览（自我改进闭环）
+
+```mermaid
+flowchart LR
+    %% 样式
+    classDef source fill:#bbdefb,stroke:#1565c0,stroke-width:2px
+    classDef process fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px
+    classDef storage fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    classDef action fill:#ffccbc,stroke:#d84315,stroke-width:2px
+
+    %% 数据源
+    subgraph Sources ["📥 数据源"]
+        LogStream[Agent 运行时<br/>Streaming Log]:::source
+        MemoryFiles[memory/*.md<br/>历史记忆文件]:::source
+    end
+
+    %% 核心引擎
+    subgraph Engine ["⚙️ 核心引擎"]
+        Hook[Bootstrap Hook<br/>v1.0<br/>事件驱动]:::process
+        Job[Scheduled Job<br/>每日凌晨<br/>定时驱动]:::process
+    end
+
+    %% 存储层
+    subgraph Storage ["🗄️ 三层知识存储"]
+        L1[L1: ERRORS.md<br/>错误收件箱<br/>待处理队列]:::storage
+        L2[L2: LEARNINGS.md<br/>结构化学习<br/>知识库]:::storage
+        L3[L3: MEMORY.md<br/>行为规则<br/>决策记忆]:::storage
+        Archive[Archive/<br/>历史归档<br/>冷数据]:::storage
+    end
+
+    %% 输出
+    subgraph Outputs ["📤 输出与消费"]
+        Agent[AIAgent<br/>读取记忆<br/>调整行为]:::action
+        Report[日报/报告<br/>可观测性]:::action
+    end
+
+    %% 连接
+    LogStream -->|tail -200| Hook
+    MemoryFiles -->|扫描| Hook
+    Hook -->|写入| L1
+    Job -->|读取| L1
+    Job -->|promote| L2
+    Job -->|promote| L3
+    Job -->|archive| Archive
+    L2 -->|读取| Agent
+    L3 -->|读取| Agent
+    Agent -->|产生新日志| LogStream
+    Job -->|生成| Report
+
+    %% 反馈循环
+    Agent -.->|自我改进循环| LogStream
+```
+
+---
+
+## 核心特性
+
+- **Bootstrap Hook v1.0（核心）**
+  - 扫描最近的 memory 文件
+  - 仅扫描最新日志文件的**最后 200 行**
+  - 命中后抓取**前后 20 行**上下文
+- **稳健写入安全**
+  - 文件锁（并发保护）
+  - 原子写入（`tmp -> rename`）
+- **噪声控制**
+  - 单次运行内按规范化 key 去重
+  - 跨运行 24h 冷却去重
+- **基于优先级的提升策略**
+  - `low`：仅标记解决
+  - `medium`：写入 `LEARNINGS.md`
+  - `high/critical`：写入 `LEARNINGS.md` + `MEMORY.md`
+- **幂等契约**
+  - 提升时通过 `Source-Err-ID` 防重复写入
+- **知识库卫生**
+  - `LEARNINGS.md` 超阈值自动归档
+  - 每日成功处理后重置 `ERRORS.md`
+
+---
+
+## 架构说明
+
+```text
+[Bootstrap Hook v1.0]
+  ├─ 扫描 memory/*.md（近期文件）
+  ├─ 扫描最新流式日志（最后 200 行）
+  ├─ 模式识别 + 上下文窗口抓取（±20）
+  ├─ 规范化去重 + 24h 冷却
+  ├─ 文件锁 + 原子写入 -> .learnings/ERRORS.md
+  └─ 注入 SELF_IMPROVEMENT_REMINDER.md（虚拟启动文件）
+
+[Scheduled Auto-Learning Job]
+  ├─ 解析待处理 ERR 块
+  ├─ 按优先级路由（low/medium/high/critical）
+  ├─ 幂等写入 LEARNINGS / MEMORY
+  ├─ 标记 resolved + Processed-At + Disposition
+  ├─ 超阈值时归档 LEARNINGS
+  └─ 重置 ERRORS.md 模板
+```
+
+---
+
+## 仓库结构
+
+```text
+self-learning-genius-agent/
+├── README.md
+├── README.zh-CN.md
+├── QUICKSTART.md
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+├── LICENSE
+├── package.json
+├── tsconfig.json
+├── .eslintrc.json
+├── .prettierrc.json
+├── .learnings/
+│   ├── ERRORS.md
+│   ├── LEARNINGS.md
+│   └── archive/
+└── self-improvement/
+    ├── handler.ts
+    └── HOOK.md
+```
+
+---
+
+## Bootstrap Hook v1.0（核心要点）
+
+将 self-improvement 放在 .openclaw\Hook：
+
+该 Hook 面向 `agent/bootstrap` 事件，执行以下操作：
+
+1. 扫描最近 memory 文件（`MAX_MEMORY_FILES=3`）
+2. 扫描最新 `.log` 文件（尾部窗口 `MAX_LOG_LINES=200`）
+3. 识别错误模式（工具错误、解析错误、用户纠正等）
+4. 捕获命中上下文（`CONTEXT_RADIUS=20`）
+5. 规范化摘要，生成稳定去重键
+6. 对相同错误键应用 24h 冷却
+7. 使用锁 + 原子写入追加到 `ERRORS.md`
+8. 注入提醒 markdown 到启动上下文
+
+---
+
+## Header 一致性（重要）
+
+`ERRORS.md` 统一使用以下标准头部：
+
+```md
+# ERRORS
+<!-- Auto-generated error inbox. New pending errors will be appended below. -->
+<!-- Fields recommended: ERR-ID, Priority, Status, Area, Summary, Details, Logged -->
+```
+
+如果当前 Hook 仍在检查 `# ERRORS.md...`，建议兼容旧格式读取，但后续统一写入 `# ERRORS`。
+
+---
+
+## `ERRORS.md` 条目格式
+
+```md
+## [ERR-YYYYMMDD-HHMMSS-XXX] category
+
+**Logged**: YYYY-MM-DDTHH:MM:SS.sssZ
+**Priority**: low|medium|high|critical
+**Status**: pending
+**Area**: config|exec|system|chart-generate|github|llm|backtest
+
+### Summary
+一句话摘要
+
+### Details
+错误信息、上下文、失败原因
+
+### Metadata
+- Source: correction|error|knowledge_gap|detected_at_bootstrap
+- Tags: [relevant-tags]
+---
+```
+
+---
+
+## 自动学习提升规则
+
+### 优先级路由
+
+- **low**
+  - 不写入 LEARNINGS/MEMORY
+  - 标记为 `resolved`
+  - `Disposition: skipped_low`
+- **medium**
+  - 写入 `LEARNINGS.md`（幂等）
+  - 标记为 `resolved`
+  - `Disposition: learned_medium`
+- **high/critical**
+  - 写入 `LEARNINGS.md`（幂等）
+  - 写入简明规则至 `MEMORY.md`（幂等）
+  - 标记为 `resolved`
+  - `Disposition: promoted_high`
+
+### 幂等契约（强制）
+
+写入 `LEARNINGS.md` 或 `MEMORY.md` 前，必须检查：
+
+```text
+Source-Err-ID: ERR-...
+```
+
+若已存在，则跳过写入。
+
+---
+
+## 归档策略
+
+当满足任一条件时归档 `LEARNINGS.md`：
+
+- 条目数 > `120`，或
+- 文件大小 > `256KB`
+
+归档动作：
+
+1. 将最旧条目移动到 `archive/LEARNINGS-YYYYMM.md`
+2. `LEARNINGS.md` 保留最新 `80` 条
+
+---
+
+## 每日重置
+
+仅在**完整成功**处理后（提升 + 状态更新 + 归档）重置 `ERRORS.md` 为模板头。
+
+> 若任务中途失败，禁止重置。
+
+---
+
+## 调度方式
+
+### Linux/macOS（cron）
+
+```cron
+30 3 * * * /usr/bin/node /path/to/auto-learning.js >> /path/to/auto-learning.log 2>&1
+```
+
+### Windows 任务计划程序
+
+- 触发器：每天 03:30
+- 操作：`node.exe C:\path\to\auto-learning.js`
+- 起始目录：项目根目录
+- 建议开启失败重试
+
+---
+
+## 示例报告
+
+```text
+📚 Auto-Learning Report | 2026-04-23
+
+Pending in ERRORS.md: 12
+- skipped low: 3
+- written to LEARNINGS.md: 7
+- promoted to MEMORY.md: 2
+- idempotency skipped: 1
+
+LEARNINGS: 86 entries (198 KB)
+ERRORS.md reset: done
+```
+
+---
+
+## 配置（默认值）
+
+- `MAX_MEMORY_FILES = 3`
+- `MAX_LOG_LINES = 200`
+- `CONTEXT_RADIUS = 20`
+- `MAX_NEW_ENTRIES_PER_RUN = 20`
+- `DEDUP_COOLDOWN_MS = 24h`
+- `LOCK_STALE_MS = 30s`
+- `LOCK_WAIT_MS = 8s`
+
+---
+
+## 安全与可靠性说明
+
+- 文件锁避免并发追加导致的内容损坏
+- 原子写入避免写入中断导致的文件截断
+- 冷却去重降低重复噪声
+- 上下文窗口提升后续根因提取质量
+
+---
+
+## 安装
+
+### 前置要求
+- Node.js >= 18.0.0
+- OpenClaw >= 1.0.0
+- TypeScript 5.0+
+
+### 快速安装
+
+```bash
+git clone https://github.com/yourusername/self-learning-genius-agent.git
+cd self-learning-genius-agent
+npm install
+npm run build
+openclaw hooks enable self-improvement
+```
+
+详细安装说明请参考 [QUICKSTART.md](./QUICKSTART.md)。
+
+---
+
+## 快速开始
+
+1. **启用 Hook（一次性）**
+   ```bash
+   openclaw hooks enable self-improvement
+   ```
+2. **启动 Agent**
+   ```bash
+   openclaw session
+   ```
+3. **查看学习产物**
+   ```bash
+   cat .learnings/ERRORS.md
+   cat .learnings/LEARNINGS.md
+   ```
+
+---
+
+## 环境变量
+
+```bash
+OPENCLAW_WORKSPACE=/path/to/workspace
+OPENCLAW_LOGS_DIR=/path/to/logs
+```
+
+---
+
+## 路线图（Roadmap）
+
+- [ ] SQLite 幂等索引
+- [ ] 语义去重（基于 embedding）
+- [ ] 审核/批准仪表盘
+- [ ] 通知集成（Slack/飞书/Email）
+- [ ] 多 Agent 共享记忆总线
+
+---
+
+## 贡献指南
+
+欢迎贡献！请按以下流程：
+
+1. Fork 仓库
+2. 新建功能分支（`git checkout -b feature/your-feature`）
+3. 提交更改（`git commit -am 'Add feature'`）
+4. 推送分支（`git push origin feature/your-feature`）
+5. 创建 Pull Request
+
+---
+
+## 许可证
+
+GPL-3.0 —— 详见 [LICENSE](./LICENSE)。
+
+---
+
+## 支持
+
+- **文档**: [QUICKSTART.md](./QUICKSTART.md) | [README.md](./README.md)
+- **OpenClaw**: https://docs.openclaw.ai/automation/hooks#hooks
