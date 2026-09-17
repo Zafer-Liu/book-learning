@@ -1,10 +1,12 @@
 {
   "name": "self-learning-genius-agent",
   "version": "1.0.0",
-  "description": "Production-ready self-improvement loop for AI agents: auto-detect errors, extract learnings, promote to memory",
+  "description": "Book-scoped RAG course tutor with multi-account Railway hosting and a preserved OpenClaw hook",
   "main": "self-improvement/handler.ts",
   "type": "module",
   "scripts": {
+    "start": "python -m study",
+    "test:study": "python -m unittest discover -s tests -v",
     "build": "tsc",
     "test": "node --test",
     "lint": "eslint .",

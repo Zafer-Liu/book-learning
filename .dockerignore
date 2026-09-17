@@ -1,0 +1,11 @@
+*
+!requirements.txt
+!study/
+!study/**
+!web/
+!web/**
+!Dockerfile
+study/**/__pycache__/
+study/**/*.pyc
+!builtin_books/
+!builtin_books/**

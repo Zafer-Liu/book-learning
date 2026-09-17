@@ -1,11 +1,81 @@
-# Agent 自动学习系统（Auto-Learning System）
+# 书内 · 教材 RAG 课程学习助手
+
+本项目新增面向 Railway 的多账户在线学习工作台。上传不同教材后，每轮提问只检索当前账户、当前书籍中的文本；切书不携带其他教材的会话。原 OpenClaw 错误记录 Hook 保留，但不参与课程助手的知识来源。
+
+## 当前能力
+
+- 账户注册、登录和可选邀请码；密码使用 PBKDF2 哈希，Cookie 会话配合 CSRF 校验。教材、会话、原文件下载和引用均在服务端按账户与书籍过滤。
+- 上传 UTF-8 `.md`、`.markdown`、`.txt`；自动识别 Markdown 标题、后台分块索引。扫描教材需先自行 OCR 为 Markdown；不处理图片、图表、公式图片或远程链接。单文件 20 MB、400 万字符，默认每账户 20 本书、50 MB 原文件。
+- 教材问答、章节讲解、要点梳理、自测练习；可选择检索章节、保存和切换学习对话。自测的答案与解析默认折叠。
+- 引用可展开真实章节与原文分块；Markdown 不编造页码。没有命中依据则明确拒答；模型缺失引用或编造引用编号时不保存回答。
+- SQLite FTS5（jieba 分词）与词法匹配为基础，配置云端 BGE / OpenAI 兼容 embedding 后启用向量通道，等权 RRF（k=60）融合。默认最多 6 段、每段 1200 字符、重叠 160 字符。
+
+与参考 RAG 规则的差异：这里不是“多个启用分类共同检索”，而是强制单书范围；不引入 Skill Catalog RAG。未配置或无法连接 embedding 时，明确降级为关键词检索，不把 hash 投影冒充语义向量。embedding 空间按接口、模型和维度共同标识，不混算不同空间的向量。暂不包含本地 ONNX 自动下载与降级。
+
+## Railway 部署
+
+1. 将本仓库连接到一个独立 Railway 服务，使用仓库内 `Dockerfile` 和 `railway.toml`；不要覆盖其他现有应用服务。健康检查为 `/health`。
+2. 给该服务挂载持久 Volume，路径 `/data`，设置 `STUDY_DATA_DIR=/data`。SQLite、教材原文件、索引、账户与会话都保存在这里。没有 Volume 时，重建容器会丢数据。
+3. 配置下面的环境变量并生成 HTTPS 域名。密钥只填写在 Railway Variables，不能提交进 Git。`.env.example` 用于查看完整变量列表。
+4. 保持 **1 个副本、1 个 Gunicorn worker**。当前 SQLite 和后台索引队列为单实例架构；不要自行增加 worker 或副本。需要水平扩展时，应先迁移外部数据库和任务队列。
+5. 注册账户并在网页上传教材。`Asset/`、`.env`、本地数据目录均被 Git / Docker 排除，仓库中的素材不会自动上传或公开。
+
+| 变量 | 用途 |
+|---|---|
+| `STUDY_SECRET_KEY` | 必填，至少 32 字符的持久随机密钥；更换后全部会话失效 |
+| `STUDY_DATA_DIR` | `/data`，必须与 Railway Volume 挂载路径一致 |
+| `STUDY_COOKIE_SECURE` | Railway 必须为 `1`；本地 HTTP 才设 `0` |
+| `STUDY_LLM_BASE_URL` | OpenAI 兼容服务根地址，推荐以 `/v1` 结尾；调用 `/chat/completions` |
+| `STUDY_LLM_API_KEY` / `STUDY_LLM_MODEL` | 问答服务令牌与模型名；无鉴权的本机服务可留空令牌 |
+| `STUDY_LLM_JSON_MODE` | 默认 `0`；仅在模型支持 `response_format=json_object` 时改为 `1` |
+| `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | 可选向量服务，调用 OpenAI 兼容 `/embeddings`，模型默认 `bge-large-zh` |
+| `STUDY_REGISTRATION_OPEN` | `1` 开放注册，`0` 关闭新用户注册，已有用户仍可登录 |
+| `STUDY_INVITE_CODE` | 建议课堂使用时设置，避免公开注册消耗模型额度 |
+| `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | 默认 100 个账户、每账户 20 本教材 |
+
+未提供 `STUDY_EMBED_BASE_URL` 时，会整组回退到参考项目的 `BAA_CLOUD_EMBED_URL`、`BAA_CLOUD_EMBED_TOKEN`、`BAA_CLOUD_EMBED_MODEL`；不会将一组端点与另一组密钥混用。不内置任何私人域名或密钥。模型地址要求 HTTPS（本机 localhost 可用 HTTP）。更换向量模型后点击“重新索引”；该操作会清除这本书的旧会话，防止旧引用关联新分块。
+
+可用 `python -c "import secrets; print(secrets.token_hex(32))"` 生成随机密钥，然后自行填入环境变量。请定期备份 Volume；备份包含用户内容与账户凭据哈希，需按私有数据保管。
+
+## 本地启动与人工验收
+
+需要 Python 3.11+，网页为原生 JavaScript/CSS，不需要前端编译。
+
+```sh
+python -m venv .venv
+# Activate this environment using the command appropriate for your shell.
+python -m pip install -r requirements.txt
+# Copy .env.example to .env and fill in the model settings.
+python -m study
+```
+
+浏览器打开 `http://127.0.0.1:8080`。已进入 Python 环境后，也可以 `npm start`。`npm run build` 只用于旧 OpenClaw Hook，不是课程助手部署的必要步骤。
+
+已添加供用户自行运行的回归测试：`python -m unittest discover -s tests -v`（或 `npm run test:study`）。请重点人工验证：两个账户访问同一教材 ID 应被拒绝；同账户两本内容互相矛盾的教材切换后不串回答；选择章节后引用不越界；重索引后的旧引用失效；断网或切书时旧响应不会进入新对话。
+
+本轮实现只做静态复核，未运行构建、测试、应用服务或真实模型调用，也未推送代码或实际部署到 Railway。模型接口目前按 OpenAI 兼容协议适配，需使用实际配置完成联调。
+
+## 边界与注意事项
+
+- 单书检索、会话归属和引用编号由代码强制验证；**引用存在不等于模型结论一定被引文支持**。当前没有独立的逐条蕴含核验模型，仍需核对原文，不能承诺零幻觉。
+- 泛化“讲解本章 / 梳理本章 / 本章自测”按位置抽取最多 6 段辅助学习，不是完整章节课程生成器。建议选择小章节并提出具体问题。
+- 教材文本保存在服务端，部署管理员可访问 Volume；“账户隔离”不是端到端加密。配置 embedding 时，教材分块发送到向量服务；提问时，命中的原文片段和近期问题发送到问答服务。只上传你有权使用并愿意交给这些服务处理的材料。
+- 目前没有邮件验证、密码找回、管理员面板、学习计划、错题本、计费、流式生成或分布式队列。停止等待只取消浏览器请求，后台可能仍会完成；重新打开对话可查看已保存结果。
+- 法律等时效性教材仅供课程学习，不自动检索最新法规，也不代替专业意见。OCR 错误必须在原文件中修正后重新上传。
+
+---
+
+## 旧版 OpenClaw 自我改进 Hook（保留）
+
+以下为原 Hook 文档，与上面的课程助手分别运行；其中历史计划不代表新增课程助手已经实现的能力。
+
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933.svg?logo=node.js&logoColor=white)](#)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?logo=typescript&logoColor=white)](#)
 [![OpenClaw](https://img.shields.io/badge/Agent_Runtime-OpenClaw-6E56CF.svg)](#)
 [![Hook](https://img.shields.io/badge/Bootstrap_Hook-v4.1-8A2BE2.svg)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-yellow.svg)](./LICENSE)
 [![Status](https://img.shields.io/badge/Status-Active-success.svg)](#)
-> **中文**：面向 AI Agent 的自动学习系统：启动检测错误、定时提升经验、持续沉淀行为记忆。  
+> **中文**：面向 AI Agent 的自动学习系统：启动检测错误、定时提升经验、持续沉淀行为记忆。\
 > **English**: A self-improvement system for AI agents: detect errors at bootstrap, promote learnings on schedule, and accumulate durable behavioral memory.
 > - 在启动阶段自动检测错误信号
 > - 将结构化错误写入 `ERRORS.md`
@@ -20,7 +90,7 @@
 
 ## 为什么需要这个项目
 
-Agent 往往会在不同会话中重复犯同类错误。  
+Agent 往往会在不同会话中重复犯同类错误。\
 本项目将运行时失败与用户纠正沉淀为可持续复用的操作知识。
 
 **目标：** 让系统形成“错误 → 提取 → 学习 → 记忆”的持续进化闭环。

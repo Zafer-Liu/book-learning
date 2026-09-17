@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172b4d">
+  <title>书内 · 课程学习助手</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <section id="auth-view" class="auth-view">
+    <div class="auth-story">
+      <a class="brand" href="/" aria-label="书内首页"><span class="brand-mark" aria-hidden="true">书</span><span>书内<small>BOOKNOTE / 课程学习</small></span></a>
+      <div class="auth-thesis"><span class="eyebrow">读懂，而不只是读过。</span><h1>问题向前一步，<br>依据回到书内。</h1><p>把教材放进书架，在讲解、梳理与自测之间切换。每个回答，都带你回到当前这本书的原文。</p></div>
+      <div class="auth-principles"><span>一本书，一个学习上下文</span><span>你的书架，仅你可见</span><span>没有依据，就不补写答案</span></div>
+    </div>
+    <div class="auth-side">
+      <form id="auth-form" class="auth-form">
+        <span class="eyebrow">你的学习空间</span><h2 id="auth-title">登录书架</h2>
+        <p id="auth-description" class="muted">继续上一次与教材的对话。</p>
+        <label>用户名<input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32" placeholder="中文、字母、数字或下划线"></label>
+        <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required minlength="10" maxlength="256" placeholder="至少 10 个字符"></label>
+        <label id="invite-label" hidden>邀请码<input id="invite-code" name="invite" autocomplete="off" maxlength="128" placeholder="向部署者获取"></label>
+        <label id="test-code-label" hidden>内测测试码<input id="test-code" name="test-code" autocomplete="off" maxlength="64" placeholder="向部署者获取，一个测试码绑定一个账户"></label>
+        <p id="auth-error" class="form-error" role="alert"></p>
+        <button id="auth-submit" class="primary" type="submit">登录</button>
+        <button id="auth-toggle" class="text-button" type="button" hidden>还没有账户？创建书架</button>
+        <p class="auth-note">教材存储在服务端，按账户隔离。提问时，相关原文片段会发送给部署者配置的模型服务；配置向量服务后，索引时也会发送教材分块。当前不提供邮件验证和自助密码找回，请妥善保管密码。</p>
+      </form>
+    </div>
+  </section>
+
+  <div id="workspace" class="workspace" hidden>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="书内首页"><span class="brand-mark" aria-hidden="true">书</span><span>书内<small>BOOKNOTE</small></span></a>
+      <span class="topbar-rule">以教材为界，让理解发生。</span>
+      <div class="account"><span id="account-name"></span><button id="settings-open" class="text-button" title="设置">设置</button><button id="logout" class="text-button">退出</button></div>
+    </header>
+    <nav class="mobile-nav" aria-label="工作区面板"><button data-panel="library">书架</button><button data-panel="study" aria-current="page">学习</button><button data-panel="evidence">原文依据</button></nav>
+    <main class="desk" data-panel="study">
+      <button id="library-expand" class="library-expand" title="展开书架" aria-label="展开书架">»</button>
+      <aside class="library panel" aria-label="我的书架">
+        <div class="panel-heading"><div><span class="eyebrow">LIBRARY</span><h2>我的书架 <span id="book-count" class="count">0</span></h2></div><div class="heading-buttons"><button id="library-toggle" class="square-button" title="收起书架" aria-label="收起书架">«</button><button id="upload-open" class="square-button" title="上传教材" aria-label="上传教材">＋</button></div></div>
+        <p class="library-hint">切一本书，开启一段独立学习。</p>
+        <div id="book-list" class="book-list"></div>
+        <div class="library-bottom"><span class="status-dot"></span><span>账户独立存储 · 单书限定检索</span></div>
+      </aside>
+      <section class="study panel" aria-label="学习对话">
+        <div class="study-heading">
+          <div><span class="eyebrow">CURRENT BOOK / 当前教材</span><h1 id="current-title">从一本教材开始</h1><p id="current-meta">上传已完成 OCR 的 Markdown，或选择书架中的教材。</p></div>
+          <div id="book-actions" class="book-actions" hidden><button id="reindex" class="text-button">重新索引</button></div>
+        </div>
+        <div id="config-warning" class="notice warning" hidden></div>
+        <div id="book-error" class="notice warning" hidden></div>
+        <div id="study-controls" class="study-controls" hidden>
+          <label class="select-field">检索章节<select id="section-select"><option value="">整本教材</option></select></label>
+          <label class="select-field conversation-field">学习对话<select id="conversation-select"><option value="">新的学习对话</option></select></label>
+          <button id="new-conversation" class="outline-button">新对话</button>
+          <button id="delete-conversation" class="square-button conversation-delete" title="删除当前对话" aria-label="删除当前对话" disabled>×</button>
+        </div>
+        <div id="messages" class="messages" aria-live="polite" aria-busy="false"></div>
+        <div class="composer-wrap">
+          <div class="modes" role="group" aria-label="学习模式"><button data-mode="qa" aria-pressed="true">教材问答</button><button data-mode="explain" aria-pressed="false">章节讲解</button><button data-mode="outline" aria-pressed="false">要点梳理</button><button data-mode="quiz" aria-pressed="false">自测练习</button></div>
+          <form id="chat-form" class="composer"><label class="sr-only" for="question">你的学习问题</label><textarea id="question" rows="2" maxlength="3000" placeholder="这本书里的哪个概念，让你停下来想了想？" disabled></textarea><div class="composer-bottom"><span id="scope-label">先选择一本完成索引的教材</span><div><button id="cancel-send" type="button" class="text-button" hidden>停止等待</button><button id="send" type="submit" class="send-button" disabled>提问 <span aria-hidden="true">↗</span></button></div></div></form>
+          <p class="composer-note">仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见</p>
+        </div>
+      </section>
+      <div id="evidence-dragbar" class="dragbar" role="separator" aria-orientation="vertical" aria-label="拖拽调整原文依据宽度"></div>
+      <aside class="evidence panel" aria-label="原文依据">
+        <div class="panel-heading"><div><span class="eyebrow">MARGIN NOTES</span><h2>原文依据</h2></div><span class="evidence-symbol" aria-hidden="true">〔 〕</span></div>
+        <div id="evidence-content" class="evidence-content"><div class="evidence-empty"><span class="margin-line" aria-hidden="true"></span><h3>答案不是终点，<br>原文才是起点。</h3><p>点击回答中的引用标记，在这里核对章节与原文段落。</p><small>Markdown 没有可靠页码，我们只标注真实的章节和分块位置。</small></div></div>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="upload-dialog" class="upload-dialog">
+    <form id="upload-form"><div class="dialog-heading"><h2>把教材放进书架</h2><button id="upload-close" type="button" class="square-button" aria-label="关闭上传窗口">×</button></div><p class="muted">每个文件对应一本教材，单独检索、单独对话。</p><label class="file-field">选择 Markdown 或 TXT<input id="book-file" name="file" type="file" accept=".md,.markdown,.txt" required></label><label>教材名称 <span class="muted">可选，默认使用文件名</span><input id="book-title" name="title" maxlength="120" placeholder="例如：行政诉讼法"></label><div class="upload-note">支持 UTF-8 编码，单本最多 20 MB / 400 万字符。扫描 PDF 请先 OCR 成 Markdown；图片、图表和外链不会自动识别。教材原文及索引保存在服务端，不会出现在其他账户的书架中。</div><p id="upload-error" class="form-error" role="alert"></p><button id="upload-submit" class="primary" type="submit">上传并建立索引</button></form>
+  </dialog>
+  <dialog id="settings-dialog" class="settings-dialog">
+    <div class="dialog-heading"><h2>设置</h2><button id="settings-close" type="button" class="square-button" aria-label="关闭设置">×</button></div>
+    <label class="toggle-field"><span class="toggle-row"><input type="checkbox" id="dev-mode-toggle"><strong>开发者模式</strong></span><small>开启后，每个回答下方会显示检索通道、命中段数与检索/生成耗时，便于确认语义检索是否生效。仅保存在本浏览器。</small></label>
+    <section class="settings-logs">
+      <div class="settings-logs-head"><h3>运行日志</h3><button id="logs-refresh" class="outline-button" type="button">刷新</button></div>
+      <p class="muted">记录问答、索引与报错，保留 3 天后自动清理。可在此确认语义检索（embedding）是否激活。</p>
+      <div id="logs-list" class="logs-list" aria-live="polite"></div>
+    </section>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

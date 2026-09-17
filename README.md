@@ -1,4 +1,23 @@
-# Agent Auto-Learning System
+# Booknote · Book-scoped RAG Course Tutor
+
+The primary application is now a Railway-ready, multi-account textbook learning workspace. Upload UTF-8 Markdown/TXT books, switch the active book, and use Q&A, chapter explanations, outlines, or self-tests with inspectable chapter/chunk citations. Scanned PDFs must be OCR'd to Markdown first; images are not indexed.
+
+Retrieval and stored conversations are filtered by both account and book before generation. The backend combines lexical matching, jieba-tokenized SQLite FTS5 and optional OpenAI-compatible embeddings with RRF. Without an embedding service it explicitly reports keyword-only retrieval. Invalid citation identifiers are rejected; this is not a guarantee that every model claim is entailed by its cited passage.
+
+See [the complete setup and limitations](README.zh-CN.md) and [.env.example](.env.example). Local startup: install `requirements.txt`, configure the model, then run `python -m study` at `http://127.0.0.1:8080`. The vanilla web UI requires no frontend build. The original TypeScript build remains for the preserved OpenClaw hook only.
+
+On Railway, use `Dockerfile` / `railway.toml`, attach a Volume at `/data`, set `STUDY_DATA_DIR=/data`, a persistent random `STUDY_SECRET_KEY` (32+ characters), `STUDY_COOKIE_SECURE=1`, and `STUDY_LLM_BASE_URL/API_KEY/MODEL`. Set `STUDY_INVITE_CODE` for classroom registration. Keep one replica and one Gunicorn worker; background indexing and SQLite are single-instance. Source books, credentials, and `Asset/` are excluded from Git and the Docker context.
+
+Book excerpts are sent to the configured LLM; configuring embeddings also sends indexed chunks to that service. Reindexing clears the book's conversations to invalidate old references. This version has no email verification, password recovery, learning-plan scheduler, or billing system.
+
+Regression tests are provided for manual execution: `python -m unittest discover -s tests -v`. Implementation was statically reviewed only; no builds, tests, live model calls, or actual Railway deployment were performed.
+
+---
+
+## Preserved OpenClaw auto-learning hook
+
+The following legacy documentation describes a separate hook, not the course tutor.
+
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933.svg?logo=node.js&logoColor=white)](#)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?logo=typescript&logoColor=white)](#)
 [![OpenClaw](https://img.shields.io/badge/Agent_Runtime-OpenClaw-6E56CF.svg)](#)
@@ -6,7 +25,7 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-yellow.svg)](./LICENSE)
 [![Status](https://img.shields.io/badge/Status-Active-success.svg)](#)
 
-> **中文**：面向 AI Agent 的自动学习系统：启动检测错误、定时提升经验、持续沉淀行为记忆。  
+> **中文**：面向 AI Agent 的自动学习系统：启动检测错误、定时提升经验、持续沉淀行为记忆。\
 > **English**: A self-improvement system for AI agents: detect errors at bootstrap, promote learnings on schedule, and accumulate durable behavioral memory.
 > - auto-detect error signals at bootstrap
 > - write structured inbox entries to `ERRORS.md`
@@ -21,7 +40,7 @@
 
 ## Why this exists
 
-Agents often repeat the same mistakes across sessions.  
+Agents often repeat the same mistakes across sessions.\
 This project turns runtime failures and user corrections into durable operational knowledge.
 
 **Goal:** make the system continuously improve from “error → extraction → learning → memory”.

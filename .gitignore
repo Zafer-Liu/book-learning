@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.study-data/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+node_modules/
+dist/
+Asset/
