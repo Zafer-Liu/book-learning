@@ -21,8 +21,8 @@
         <p id="auth-description" class="muted">继续上一次与教材的对话。</p>
         <label>用户名<input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32" placeholder="中文、字母、数字或下划线"></label>
         <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required minlength="10" maxlength="256" placeholder="至少 10 个字符"></label>
-        <label id="invite-label" hidden>邀请码<input id="invite-code" name="invite" autocomplete="off" maxlength="128" placeholder="向部署者获取"></label>
         <label id="test-code-label" hidden>内测测试码<input id="test-code" name="test-code" autocomplete="off" maxlength="64" placeholder="向部署者获取，一个测试码绑定一个账户"></label>
+        <label id="api-key-label" hidden>API Key（无测试码时必填）<input id="api-key" name="api-key" type="password" autocomplete="off" maxlength="400" placeholder="填写你自己的模型 API Key，问答使用你的额度"></label>
         <p id="auth-error" class="form-error" role="alert"></p>
         <button id="auth-submit" class="primary" type="submit">登录</button>
         <button id="auth-toggle" class="text-button" type="button" hidden>还没有账户？创建书架</button>
@@ -37,7 +37,7 @@
       <span class="topbar-rule">以教材为界，让理解发生。</span>
       <div class="account"><span id="account-name"></span><button id="settings-open" class="text-button" title="设置">设置</button><button id="logout" class="text-button">退出</button></div>
     </header>
-    <nav class="mobile-nav" aria-label="工作区面板"><button data-panel="library">书架</button><button data-panel="study" aria-current="page">学习</button><button data-panel="evidence">原文依据</button></nav>
+    <nav class="mobile-nav" aria-label="工作区面板"><button data-panel="library">书架</button><button data-panel="study" aria-current="page">学习</button><button data-panel="evidence">阅读批注</button></nav>
     <main class="desk" data-panel="study">
       <button id="library-expand" class="library-expand" title="展开书架" aria-label="展开书架">»</button>
       <aside class="library panel" aria-label="我的书架">
@@ -46,10 +46,14 @@
         <div id="book-list" class="book-list"></div>
         <div class="library-bottom"><span class="status-dot"></span><span>账户独立存储 · 单书限定检索</span></div>
       </aside>
-      <section class="study panel" aria-label="学习对话">
+      <section id="study-panel" class="study panel" aria-label="学习对话">
+        <div id="reader-chat-bar" class="reader-chat-bar" hidden>
+          <button id="reader-chat-drag" class="reader-chat-drag" type="button" title="拖动移动问答窗口，聚焦后也可使用方向键" aria-label="移动 AI 问答窗口，支持拖动和方向键"><span>AI 问答</span><small>仅依据当前教材</small></button>
+          <button id="reader-chat-minimize" class="text-button" type="button" aria-label="收起 AI 问答窗口">收起</button>
+        </div>
         <div class="study-heading">
           <div><span class="eyebrow">CURRENT BOOK / 当前教材</span><h1 id="current-title">从一本教材开始</h1><p id="current-meta">上传已完成 OCR 的 Markdown，或选择书架中的教材。</p></div>
-          <div id="book-actions" class="book-actions" hidden><button id="reindex" class="text-button">重新索引</button></div>
+          <div id="book-actions" class="book-actions" hidden><button id="read-book" class="outline-button">阅读全文</button><button id="book-notes" class="text-button">我的批注</button><button id="reindex" class="text-button">重新索引</button></div>
         </div>
         <div id="config-warning" class="notice warning" hidden></div>
         <div id="book-error" class="notice warning" hidden></div>
@@ -61,30 +65,49 @@
         </div>
         <div id="messages" class="messages" aria-live="polite" aria-busy="false"></div>
         <div class="composer-wrap">
-          <div class="modes" role="group" aria-label="学习模式"><button data-mode="qa" aria-pressed="true">教材问答</button><button data-mode="explain" aria-pressed="false">章节讲解</button><button data-mode="outline" aria-pressed="false">要点梳理</button><button data-mode="quiz" aria-pressed="false">自测练习</button></div>
-          <form id="chat-form" class="composer"><label class="sr-only" for="question">你的学习问题</label><textarea id="question" rows="2" maxlength="3000" placeholder="这本书里的哪个概念，让你停下来想了想？" disabled></textarea><div class="composer-bottom"><span id="scope-label">先选择一本完成索引的教材</span><div><button id="cancel-send" type="button" class="text-button" hidden>停止等待</button><button id="send" type="submit" class="send-button" disabled>提问 <span aria-hidden="true">↗</span></button></div></div></form>
-          <p class="composer-note">仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见</p>
+          <div class="modes" role="group" aria-label="学习模式"><button data-mode="qa" aria-pressed="true">教材问答</button><button data-mode="explain" aria-pressed="false">章节讲解</button><button data-mode="outline" aria-pressed="false">要点梳理</button><button data-mode="quiz" aria-pressed="false">自测练习</button><label id="web-toggle-label" class="web-toggle" hidden title="回答仍以当前教材为主，仅在教材覆盖不到时联网补充，网络来源以 W 标注"><input type="checkbox" id="web-search-toggle">联网补充</label></div>
+          <form id="chat-form" class="composer"><label class="sr-only" for="question">你的学习问题</label><textarea id="question" rows="2" maxlength="3000" placeholder="这本书里的哪个概念，让你停下来想了想？" disabled></textarea><div class="composer-bottom"><span id="scope-label">先选择一本完成索引的教材</span><div><span id="context-meter" class="context-meter" hidden title="当前对话未压缩的上下文体量；达到阈值后自动把较早问答压缩成摘要，计数随之回落"><span class="context-bar" aria-hidden="true"><span class="context-fill"></span></span><span class="context-text"></span></span><button id="cancel-send" type="button" class="text-button" hidden>停止等待</button><button id="send" type="submit" class="send-button" disabled>提问 <span aria-hidden="true">↗</span></button></div></div></form>
+          <p class="composer-note" id="composer-note">仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见</p>
         </div>
       </section>
       <div id="evidence-dragbar" class="dragbar" role="separator" aria-orientation="vertical" aria-label="拖拽调整原文依据宽度"></div>
-      <aside class="evidence panel" aria-label="原文依据">
-        <div class="panel-heading"><div><span class="eyebrow">MARGIN NOTES</span><h2>原文依据</h2></div><span class="evidence-symbol" aria-hidden="true">〔 〕</span></div>
-        <div id="evidence-content" class="evidence-content"><div class="evidence-empty"><span class="margin-line" aria-hidden="true"></span><h3>答案不是终点，<br>原文才是起点。</h3><p>点击回答中的引用标记，在这里核对章节与原文段落。</p><small>Markdown 没有可靠页码，我们只标注真实的章节和分块位置。</small></div></div>
+      <aside class="evidence panel" aria-label="原文阅读与批注">
+        <div class="panel-heading"><div><span class="eyebrow">MARGIN NOTES</span><h2>原文阅读</h2></div><button id="reader-focus" class="outline-button" aria-pressed="false" hidden>展开阅读</button></div>
+        <div id="evidence-content" class="evidence-content"><div class="evidence-empty"><span class="margin-line" aria-hidden="true"></span><h3>答案不是终点，<br>原文才是起点。</h3><p>点击回答中的引用标记，或直接选择“阅读全文”，在这里通读整本书并添加私人批注。</p><small>Markdown 没有可靠页码，我们只标注真实的章节和正文位置。</small></div></div>
       </aside>
+      <button id="reader-chat-launcher" class="reader-chat-launcher" type="button" aria-controls="study-panel" aria-expanded="false" hidden>AI 问答</button>
     </main>
   </div>
 
   <dialog id="upload-dialog" class="upload-dialog">
-    <form id="upload-form"><div class="dialog-heading"><h2>把教材放进书架</h2><button id="upload-close" type="button" class="square-button" aria-label="关闭上传窗口">×</button></div><p class="muted">每个文件对应一本教材，单独检索、单独对话。</p><label class="file-field">选择 Markdown 或 TXT<input id="book-file" name="file" type="file" accept=".md,.markdown,.txt" required></label><label>教材名称 <span class="muted">可选，默认使用文件名</span><input id="book-title" name="title" maxlength="120" placeholder="例如：行政诉讼法"></label><div class="upload-note">支持 UTF-8 编码，单本最多 20 MB / 400 万字符。扫描 PDF 请先 OCR 成 Markdown；图片、图表和外链不会自动识别。教材原文及索引保存在服务端，不会出现在其他账户的书架中。</div><p id="upload-error" class="form-error" role="alert"></p><button id="upload-submit" class="primary" type="submit">上传并建立索引</button></form>
+    <form id="upload-form"><div class="dialog-heading"><h2>把教材放进书架</h2><button id="upload-close" type="button" class="square-button" aria-label="关闭上传窗口">×</button></div><p class="muted">每个文件对应一本教材，单独检索、单独对话。</p><label class="file-field">选择 Markdown、TXT 或 DOCX<input id="book-file" name="file" type="file" accept=".md,.markdown,.txt,.docx" required></label><label>教材名称 <span class="muted">可选，默认使用文件名</span><input id="book-title" name="title" maxlength="120" placeholder="例如：行政诉讼法"></label><div class="upload-note">Markdown/TXT 需 UTF-8 编码，DOCX 会自动提取文字并识别章节标题；单本最多 20 MB / 400 万字符。扫描 PDF 请先 OCR；图片、图表和外链不会自动识别。教材原文及索引保存在服务端，不会出现在其他账户的书架中。</div><p id="upload-error" class="form-error" role="alert"></p><button id="upload-submit" class="primary" type="submit">上传并建立索引</button></form>
   </dialog>
   <dialog id="settings-dialog" class="settings-dialog">
     <div class="dialog-heading"><h2>设置</h2><button id="settings-close" type="button" class="square-button" aria-label="关闭设置">×</button></div>
     <label class="toggle-field"><span class="toggle-row"><input type="checkbox" id="dev-mode-toggle"><strong>开发者模式</strong></span><small>开启后，每个回答下方会显示检索通道、命中段数与检索/生成耗时，便于确认语义检索是否生效。仅保存在本浏览器。</small></label>
+    <section class="apikey-field">
+      <div class="settings-logs-head"><h3>个人 API Key</h3><button id="apikey-save" class="outline-button" type="button">保存</button></div>
+      <input id="apikey-input" type="password" autocomplete="off" maxlength="400" placeholder="填写后，你的问答使用自己的模型密钥；留空保存即清除">
+      <p id="apikey-status" class="muted"></p>
+    </section>
     <section class="settings-logs">
       <div class="settings-logs-head"><h3>运行日志</h3><button id="logs-refresh" class="outline-button" type="button">刷新</button></div>
       <p class="muted">记录问答、索引与报错，保留 3 天后自动清理。可在此确认语义检索（embedding）是否激活。</p>
       <div id="logs-list" class="logs-list" aria-live="polite"></div>
     </section>
+  </dialog>
+  <dialog id="annotation-dialog" class="annotation-dialog" aria-labelledby="annotation-title">
+    <form id="annotation-form">
+      <div class="dialog-heading"><h2 id="annotation-title">添加批注</h2><button id="annotation-close" type="button" class="square-button" aria-label="关闭批注窗口">×</button></div>
+      <p id="annotation-version" class="muted"></p>
+      <blockquote id="annotation-quote" class="annotation-quote"></blockquote>
+      <label for="annotation-note">笔记 <span class="muted">可选，留空只保存高亮</span></label>
+      <textarea id="annotation-note" rows="5" maxlength="4000" placeholder="写下你的理解、疑问或与其他段落的联系。"></textarea>
+      <fieldset class="annotation-colors"><legend>高亮颜色</legend><label><input type="radio" name="annotation-color" value="yellow" checked>麦黄</label><label><input type="radio" name="annotation-color" value="blue">浅蓝</label><label><input type="radio" name="annotation-color" value="green">青绿</label></fieldset>
+      <p id="annotation-error" class="form-error" role="alert"></p>
+      <div class="annotation-actions"><button id="annotation-delete" type="button" class="text-button danger" hidden>删除批注</button><button id="annotation-save" type="submit" class="primary">保存批注</button></div>
+      <p class="muted annotation-private">批注仅当前账户可见，不会发送给模型服务。</p>
+    </form>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>

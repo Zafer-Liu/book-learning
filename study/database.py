@@ -11,7 +11,8 @@ BUILTIN_OWNER = "builtin"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY, username TEXT NOT NULL, username_key TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+    password_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    api_key TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS books (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
@@ -30,6 +31,19 @@ CREATE TABLE IF NOT EXISTS chunks (
     UNIQUE(book_id, ordinal)
 );
 CREATE INDEX IF NOT EXISTS chunks_scope ON chunks(owner_id, book_id, section);
+CREATE TABLE IF NOT EXISTS annotations (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    version TEXT NOT NULL, start INTEGER NOT NULL CHECK(start >= 0),
+    end INTEGER NOT NULL CHECK(end > start),
+    quote TEXT NOT NULL CHECK(length(quote) BETWEEN 1 AND 4000),
+    note TEXT NOT NULL DEFAULT '' CHECK(length(note) <= 4000),
+    color TEXT NOT NULL DEFAULT 'yellow' CHECK(color IN ('yellow','blue','green')),
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS annotations_scope ON annotations(owner_id, book_id, start, id);
+CREATE INDEX IF NOT EXISTS annotations_book ON annotations(book_id);
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, book_id TEXT NOT NULL,
     title TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -88,6 +102,17 @@ class Database:
             columns = [row[1] for row in db.execute("PRAGMA table_info(feedback)")]
             if "reason" not in columns:
                 db.execute("ALTER TABLE feedback ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+            # Older deployments created users without the BYO api_key column.
+            columns = [row[1] for row in db.execute("PRAGMA table_info(users)")]
+            if "api_key" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN api_key TEXT NOT NULL DEFAULT ''")
+            # Older deployments created conversations without the compaction
+            # columns (rolling summary + watermark of the last covered message).
+            columns = [row[1] for row in db.execute("PRAGMA table_info(conversations)")]
+            if "summary" not in columns:
+                db.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            if "summary_mark" not in columns:
+                db.execute("ALTER TABLE conversations ADD COLUMN summary_mark TEXT NOT NULL DEFAULT ''")
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(tokens)")
             db.executescript("""
                 CREATE TRIGGER IF NOT EXISTS chunks_delete_fts AFTER DELETE ON chunks BEGIN

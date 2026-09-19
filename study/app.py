@@ -22,10 +22,16 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from .compaction import (
+    compaction_circuit_open, compact_conversation, context_usage,
+    record_compaction_result, should_compact,
+)
 from .database import BUILTIN_OWNER, Database, public_book, public_message
 from .documents import FORMATS, parse_document, split_sections
 from .rag import EmbeddingClient, index_tokens, retrieve, semantic_sentence_ranges, terms
+from .reader import register_reader_routes
 from .tutor import MODES, Tutor, TutorError
+from .websearch import WebSearchClient, WebSearchError
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
@@ -38,6 +44,19 @@ def now():
 
 def uid():
     return uuid.uuid4().hex
+
+
+def search_step_text(step):
+    """One-line description of a search_book / web_search tool call, shared by
+    the SSE status event, the per-call log row and the persisted step list."""
+    label = step["query"] or "无效请求"
+    if step.get("web"):
+        prefix, unit = "联网检索", "条来源"
+    else:
+        prefix = "自动检索" if step.get("auto") else "检索"
+        unit = "段"
+    outcome = "调用被拒绝" if step.get("error") else f"命中 {step['count']} {unit}"
+    return f"{prefix}「{label}」· {outcome}"
 
 
 def create_app(test_config=None):
@@ -53,7 +72,6 @@ def create_app(test_config=None):
         SESSION_COOKIE_SECURE=os.getenv("STUDY_COOKIE_SECURE", "1" if hosted else "0") == "1",
         PERMANENT_SESSION_LIFETIME=timedelta(days=7),
         REGISTRATION_OPEN=os.getenv("STUDY_REGISTRATION_OPEN", "1") == "1",
-        INVITE_CODE=os.getenv("STUDY_INVITE_CODE", ""),
         TEST_CODES=tuple(code for code in (part.strip().upper() for part
                                            in re.split(r"[,\s]+", os.getenv("STUDY_TEST_CODES", "")))
                          if 6 <= len(code) <= 64),
@@ -79,14 +97,17 @@ def create_app(test_config=None):
     if hosted:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     database = Database(root)
-    embedder, tutor = EmbeddingClient(), Tutor()
+    embedder, tutor, searcher = EmbeddingClient(), Tutor(), WebSearchClient()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="book-index")
     index_slots = threading.BoundedSemaphore(4)
     model_slots = threading.BoundedSemaphore(2)
     guard = threading.Lock()
     book_locks, user_locks = {}, {}
+    # Per-conversation compaction breaker state (in-memory; process-local).
+    compact_circuits = {}
     rate_buckets = defaultdict(deque)
-    app.extensions.update(database=database, embedder=embedder, tutor=tutor, index_executor=executor)
+    app.extensions.update(database=database, embedder=embedder, tutor=tutor, web_search=searcher,
+                          index_executor=executor)
 
     def lock_for(mapping, key):
         with guard:
@@ -195,7 +216,7 @@ def create_app(test_config=None):
         user_id = session.get("user_id")
         if user_id:
             with database.connect() as db:
-                row = db.execute("SELECT id,username FROM users WHERE id=?", (user_id,)).fetchone()
+                row = db.execute("SELECT id,username,api_key FROM users WHERE id=?", (user_id,)).fetchone()
                 g.user = dict(row) if row else None
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             expected, actual = session.get("csrf", ""), request.headers.get("X-CSRF-Token", "")
@@ -246,7 +267,7 @@ def create_app(test_config=None):
 
     @app.get("/assets/<path:name>")
     def assets(name):
-        if name not in {"app.js", "styles.css"}:
+        if name not in {"app.js", "reader.js", "styles.css"}:
             abort(404)
         response = send_from_directory(ROOT / "web", name)
         response.headers["Cache-Control"] = "no-cache"
@@ -258,9 +279,12 @@ def create_app(test_config=None):
         # the register entry hides itself again once every code is used up.
         with database.connect() as db:
             open_codes = db.execute("SELECT count(*) FROM test_codes WHERE bound_username=''").fetchone()[0]
-        return jsonify(user=g.user, csrf_token=csrf_token(), registration_open=app.config["REGISTRATION_OPEN"],
-                       invite_required=bool(app.config["INVITE_CODE"]),
-                       test_code_registration=bool(open_codes))
+        user = None
+        if g.user:
+            user = {"id": g.user["id"], "username": g.user["username"]}
+        return jsonify(user=user, csrf_token=csrf_token(), registration_open=app.config["REGISTRATION_OPEN"],
+                       test_code_registration=bool(open_codes),
+                       api_key_set=bool(g.user and g.user.get("api_key")))
 
     def auth_response(user):
         session.clear()
@@ -282,12 +306,16 @@ def create_app(test_config=None):
         data = body()
         supplied_code = data.get("test_code")
         test_code = supplied_code.strip().upper() if isinstance(supplied_code, str) else ""
+        api_key = str(data.get("api_key", "") or "").strip()
         if not test_code:
+            # No test code: open registration requires the user's own API key,
+            # so their model calls run on their key instead of the site's.
             if not app.config["REGISTRATION_OPEN"]:
-                abort(403, description="暂未开放注册，请联系部署者。")
-            invitation = str(data.get("invite_code", ""))
-            if app.config["INVITE_CODE"] and not hmac.compare_digest(invitation.encode(), app.config["INVITE_CODE"].encode()):
-                abort(403, description="邀请码不正确。")
+                abort(403, description="暂未开放无测试码注册，请联系部署者。")
+            if not 8 <= len(api_key) <= 400 or re.search(r"\s", api_key):
+                abort(403, description="无测试码注册需填写有效的 API Key（8–400 个字符，不含空格），问答将使用你自己的密钥。")
+        elif api_key and (not 8 <= len(api_key) <= 400 or re.search(r"\s", api_key)):
+            abort(400, description="API Key 需为 8–400 个字符且不含空格。")
         username, password = credentials(data)
         user = {"id": uid(), "username": username}
         password_hash = generate_password_hash(password, method="pbkdf2:sha256:600000")
@@ -305,8 +333,8 @@ def create_app(test_config=None):
                         abort(403, description="测试码已被使用。")
                 if db.execute("SELECT count(*) FROM users").fetchone()[0] >= app.config["MAX_USERS"]:
                     abort(403, description="注册名额已满，请联系部署者。")
-                db.execute("INSERT INTO users VALUES (?,?,?,?,?)",
-                           (user["id"], username, username.casefold(), password_hash, now()))
+                db.execute("INSERT INTO users VALUES (?,?,?,?,?,?)",
+                           (user["id"], username, username.casefold(), password_hash, now(), api_key))
                 if test_code:
                     db.execute("UPDATE test_codes SET bound_username=?,bound_user_id=?,bound_at=? WHERE code=?",
                                (username, user["id"], now(), test_code))
@@ -314,7 +342,23 @@ def create_app(test_config=None):
             abort(409, description="该用户名不可用，请换一个。")
         if test_code:
             add_log("test_code_bound", detail=f"测试码绑定新账户「{username}」")
+        elif api_key:
+            add_log("api_key_registered", detail=f"账户「{username}」使用个人 API Key 注册")
         return auth_response(user)
+
+    @app.post("/api/account/api-key")
+    def set_api_key():
+        # Update or clear the account's BYO key; empty string clears it.
+        data = body()
+        raw = data.get("api_key")
+        api_key = raw.strip() if isinstance(raw, str) else None
+        if api_key is None or len(api_key) > 400 or re.search(r"\s", api_key) or \
+                (api_key and len(api_key) < 8):
+            abort(400, description="API Key 需为 8–400 个字符且不含空格；留空表示清除。")
+        with database.connect() as db:
+            db.execute("UPDATE users SET api_key=? WHERE id=?", (api_key, g.user["id"]))
+        add_log("api_key_updated", detail=f"账户「{g.user['username']}」{'清除' if not api_key else '更新'}了个人 API Key")
+        return jsonify(ok=True, api_key_set=bool(api_key))
 
     @app.post("/api/auth/login")
     def login():
@@ -337,6 +381,7 @@ def create_app(test_config=None):
     def config():
         return jsonify(llm_configured=tutor.configured, embedding_configured=embedder.configured,
                        embedding_backend="cloud" if embedder.configured else "lexical+fts5",
+                       web_search_configured=searcher.configured,
                        max_upload_mb=20, formats=sorted(FORMATS))
 
     @app.get("/api/logs")
@@ -407,7 +452,7 @@ def create_app(test_config=None):
             abort(400, description="请选择教材文件。")
         filename = file.filename.replace("\\", "/").split("/")[-1]
         if re.search(r"[\x00-\x1f\x7f]", filename) or len(filename) > 180 or Path(filename).suffix.lower() not in FORMATS:
-            abort(400, description="仅支持 Markdown 和 TXT；文件名不能含控制字符且不超过 180 字符。")
+            abort(400, description="仅支持 Markdown、TXT 和 DOCX；文件名不能含控制字符且不超过 180 字符。")
         title = (request.form.get("title") or Path(filename).stem).strip()[:120]
         if not title:
             abort(400, description="请输入教材名称。")
@@ -541,9 +586,45 @@ def create_app(test_config=None):
                          f"AND ordinal{comparison}? ORDER BY ordinal {order} LIMIT 1")
                 return db.execute(query, scope + (row["ordinal"],)).fetchone()
             prev, nxt = neighbor("<", "DESC"), neighbor(">", "ASC")
+            # A window of chunks around the citation lets the reference
+            # panel read continuously by scrolling instead of paging.
+            window = db.execute(
+                "SELECT id,text,section,page,ordinal FROM chunks "
+                "WHERE owner_id IN (?, ?) AND book_id=? "
+                "AND ordinal BETWEEN ? AND ? ORDER BY ordinal",
+                scope + (row["ordinal"] - 3, row["ordinal"] + 6)).fetchall()
         return jsonify(chunk=dict(row),
                        prev=dict(prev) if prev else None,
-                       next=dict(nxt) if nxt else None)
+                       next=dict(nxt) if nxt else None,
+                       window=[dict(item) for item in window])
+
+    @app.get("/api/books/<book_id>/chunks")
+    def chunk_range(book_id):
+        # Streaming context feed for the scrollable reference panel.
+        anchor = request.args.get("anchor", type=int)
+        direction = request.args.get("direction")
+        count = request.args.get("count", default=10, type=int)
+        if anchor is None or direction not in {"before", "after"} or not 1 <= count <= 20:
+            abort(400, description="参数无效。")
+        with database.connect() as db:
+            book = book_row(db, book_id)
+            if book["status"] != "ready":
+                abort(409, description="教材尚未完成索引。")
+            scope = (g.user["id"], BUILTIN_OWNER, book_id)
+            row = db.execute("SELECT ordinal FROM chunks "
+                             "WHERE id=? AND owner_id IN (?, ?) AND book_id=?",
+                             (anchor, g.user["id"], BUILTIN_OWNER, book_id)).fetchone()
+            if row is None:
+                abort(404, description="引用不属于当前教材或已失效。")
+            comparison, order = ("<", "DESC") if direction == "before" else (">", "ASC")
+            rows = db.execute(
+                f"SELECT id,text,section,page,ordinal FROM chunks "
+                f"WHERE owner_id IN (?, ?) AND book_id=? AND ordinal{comparison}? "
+                f"ORDER BY ordinal {order} LIMIT ?",
+                scope + (row["ordinal"], count)).fetchall()
+        if direction == "before":
+            rows.reverse()
+        return jsonify(chunks=[dict(item) for item in rows])
 
     @app.post("/api/books/<book_id>/chunks/<int:chunk_id>/match")
     def chunk_match(book_id, chunk_id):
@@ -585,7 +666,7 @@ def create_app(test_config=None):
                 abort(409, description="请等待教材索引完成。")
             if db.execute("SELECT count(*) FROM conversations WHERE owner_id=? AND book_id=?", (g.user["id"], book_id)).fetchone()[0] >= 100:
                 abort(400, description="本书已达到 100 个会话上限，请使用已有会话。")
-            db.execute("INSERT INTO conversations VALUES(?,?,?,?,?)",
+            db.execute("INSERT INTO conversations(id,owner_id,book_id,title,created_at) VALUES(?,?,?,?,?)",
                        (conversation["id"], g.user["id"], book_id, conversation["title"], conversation["created_at"]))
         return jsonify(conversation=conversation), 201
 
@@ -624,8 +705,14 @@ def create_app(test_config=None):
                 "WHERE messages.owner_id=? AND messages.book_id=? AND messages.conversation_id=? "
                 "ORDER BY messages.created_at, messages.id",
                 (g.user["id"], book_id, conversation_id)).fetchall()
+        # Context meter: the un-compacted tail that counts toward the next
+        # compression, plus the summary size already folded away.
+        summary = conversation["summary"] or ""
+        context = context_usage([dict(row) for row in rows], conversation["summary_mark"] or "")
+        context["summary_chars"] = len(summary)
         return jsonify(conversation={key: conversation[key] for key in ("id", "title", "created_at")},
-                       messages=[{**public_message(row), "feedback": row["feedback_rating"]} for row in rows])
+                       messages=[{**public_message(row), "feedback": row["feedback_rating"]} for row in rows],
+                       context=context)
 
     @app.post("/api/books/<book_id>/conversations/<conversation_id>/messages/<message_id>/feedback")
     def rate_message(book_id, conversation_id, message_id):
@@ -688,6 +775,9 @@ def create_app(test_config=None):
         if not isinstance(mode, str) or mode not in MODES or (section is not None and not isinstance(section, str)):
             abort(400, description="学习模式或章节参数无效。")
         question = question.strip()
+        # Opt-in web supplement: honoured only when the deployment configured
+        # the search MCP and the agentic QA path (qa mode) will actually run.
+        web_enabled = bool(data.get("web")) and searcher.configured and mode == "qa"
         owner = g.user["id"]
         with database.connect() as db:
             book = book_row(db, book_id)
@@ -715,7 +805,11 @@ def create_app(test_config=None):
                 yield sse({"type": "status", "stage": "retrieve", "text": "正在检索本书相关内容…"})
                 with database.connect() as db:
                     book = book_row(db, book_id)
-                    conversation_row(db, book_id, conversation_id)
+                    conversation = conversation_row(db, book_id, conversation_id)
+                    # Rolling compaction summary of earlier turns rides along
+                    # as untrusted context; empty until the conversation is long.
+                    summary = conversation["summary"] or ""
+                    summary_mark = conversation["summary_mark"] or ""
                     if book["status"] != "ready":
                         add_log("chat_error", level="error", detail=f"教材尚未完成索引 · 问: {question[:60]}", owner_id=owner)
                         yield sse({"type": "error", "error": "请等待教材完成索引。"})
@@ -745,10 +839,12 @@ def create_app(test_config=None):
                     query = question
                     if re.search(r"继续|上面|刚才|它|这个|这一|再讲|举例", question) and previous:
                         query = previous[-1][:300] + " " + question
-                    search_terms = terms(query)
-                    fts_ids = []
-                    if search_terms:
-                        match = " OR ".join('"' + word.replace('"', '""') + '"' for word in search_terms)
+
+                    def fts_lookup(word_list):
+                        """FTS candidates for any query text; scope filters stay in SQL."""
+                        if not word_list:
+                            return []
+                        match = " OR ".join('"' + word.replace('"', '""') + '"' for word in word_list)
                         fts_sql = ("SELECT c.id FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid "
                                    "WHERE chunks_fts MATCH ? AND c.owner_id IN (?, ?) AND c.book_id=?")
                         fts_params = [match, owner, BUILTIN_OWNER, book_id]
@@ -756,36 +852,71 @@ def create_app(test_config=None):
                             fts_sql += " AND c.section=?"
                             fts_params.append(section)
                         try:
-                            fts_ids = [row[0] for row in db.execute(fts_sql + " ORDER BY bm25(chunks_fts) LIMIT 24", fts_params)]
+                            with database.connect() as db:
+                                return [row[0] for row in db.execute(
+                                    fts_sql + " ORDER BY bm25(chunks_fts) LIMIT 24", fts_params)]
                         except sqlite3.OperationalError:
                             LOG.warning("FTS query unavailable; using lexical channel")
-                retrieve_started = time.monotonic()
-                result = retrieve(query, chunks, fts_ids, embedder)
-                retrieve_ms = int((time.monotonic() - retrieve_started) * 1000)
-                overview = mode in {"outline", "quiz", "explain"} and not search_terms
-                if overview and chunks:
-                    # Evenly sampled excerpts are explicit, never called a full-book summary.
-                    indices = sorted({round(i * (len(chunks) - 1) / min(5, len(chunks) - 1))
-                                      for i in range(min(6, len(chunks)))}) if len(chunks) > 1 else [0]
-                    result["hits"] = [chunks[index] for index in indices]
-                retrieval = {key: result[key] for key in ("backend", "degraded")}
-                retrieval["scope"] = "selected-excerpts" if overview else "retrieved-excerpts"
-                retrieval["section"] = section
-                hit_count = len(result["hits"])
-                retrieval["hits"] = hit_count
-                retrieval["retrieve_ms"] = retrieve_ms
-                # Shipped with the answer so the evidence panel can highlight query hits.
-                retrieval["terms"] = search_terms[:24]
-                stage_text = (f"已定位 {hit_count} 段相关原文，正在核对引用并生成回答…" if hit_count
-                              else "未检索到直接相关的原文，正在整理回答…")
-                yield sse({"type": "status", "stage": "generate", "text": stage_text, "hits": hit_count})
+                            return []
+
+                    search_terms = terms(query)
                 streamed, answer = False, None
+                user_key = g.user.get("api_key") or ""
+                hit_count, retrieve_ms, overview = 0, 0, False
+                retrieval = {}
                 try:
                     generate_started = time.monotonic()
-                    if mode != "quiz":
+                    if mode == "qa":
+                        # Agentic QA: the model drives retrieval itself through
+                        # the search_book tool; classic retrieval is fallback.
+                        agent_state = {"steps": [], "word_set": set(), "backend": "lexical+fts5",
+                                       "degraded": True, "ms": 0}
+
+                        def run_agent_search(agent_query, limit):
+                            started = time.monotonic()
+                            word_list = terms(agent_query)
+                            agent_state["word_set"].update(word_list)
+                            result = retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit)
+                            agent_state["backend"] = result["backend"]
+                            agent_state["degraded"] = result["degraded"]
+                            agent_state["ms"] += int((time.monotonic() - started) * 1000)
+                            return result["hits"]
+
+                        def run_web_search(web_query):
+                            """One opt-in lookup on the deployment's search MCP;
+                            failures become tool errors the model can route
+                            around instead of killing the stream."""
+                            try:
+                                throttle(("web-search", owner), 40, 3600)
+                            except HTTPException as exc:
+                                raise WebSearchError(str(exc.description)) from exc
+                            return searcher.search(web_query, 6)
+
+                        yield sse({"type": "status", "stage": "generate",
+                                   "text": "模型正在自主检索本书并核对引用…"})
                         try:
-                            for kind, value in tutor.generate_stream(question, mode, book["title"], result["hits"], previous, retrieval):
-                                if kind == "delta":
+                            for kind, value in tutor.agent_stream(question, mode, book["title"], run_agent_search,
+                                                                  previous, retrieval, user_key, summary,
+                                                                  run_web_search if web_enabled else None):
+                                if kind == "search":
+                                    # Every tool call becomes a visible UI step,
+                                    # a dedicated log row and persisted metadata.
+                                    step = {"query": (value.get("query") or "")[:60],
+                                            "count": int(value.get("count") or 0)}
+                                    if value.get("web"):
+                                        step["web"] = True
+                                    if value.get("auto"):
+                                        step["auto"] = True
+                                    if value.get("error"):
+                                        step["error"] = True
+                                    agent_state["steps"].append(step)
+                                    add_log("web_search" if step.get("web") else "agent_search",
+                                            level="warning" if step.get("error") else "info",
+                                            detail=f"{search_step_text(step)} · 问: {question[:40]}",
+                                            owner_id=owner)
+                                    yield sse({"type": "status", "stage": "search", "reset": True,
+                                               "text": search_step_text(step), "search": step})
+                                elif kind == "delta":
                                     streamed = True
                                     yield sse({"type": "delta", "text": value})
                                 else:
@@ -793,10 +924,62 @@ def create_app(test_config=None):
                         except TutorError:
                             if streamed:
                                 raise
-                            # Streaming failed before any text arrived; retry one-shot.
-                            answer = tutor.generate(question, mode, book["title"], result["hits"], previous, retrieval)
-                    else:
-                        answer = tutor.generate(question, mode, book["title"], result["hits"], previous, retrieval)
+                            # Provider rejected tools or the loop died before
+                            # any visible text: retry with the classic pipeline.
+                            LOG.warning("agent loop failed before streaming; using classic retrieval")
+                            answer = None
+                        if answer is not None:
+                            hit_count = retrieval.get("evidence", len(answer.get("citations", [])))
+                            retrieve_ms = agent_state["ms"]
+                            web_steps = sum(1 for step in agent_state["steps"] if step.get("web"))
+                            retrieval.update({
+                                "backend": agent_state["backend"], "degraded": agent_state["degraded"],
+                                "scope": "agent-searches", "section": section,
+                                "steps": agent_state["steps"],
+                                "searches": len(agent_state["steps"]) - web_steps,
+                                "hits": hit_count, "retrieve_ms": retrieve_ms,
+                                # Shipped with the answer so the evidence panel can highlight query hits.
+                                "terms": sorted(agent_state["word_set"])[:24],
+                            })
+                            if web_steps:
+                                retrieval["web_searches"] = web_steps
+                            retrieval.pop("evidence", None)
+                    if answer is None:
+                        retrieve_started = time.monotonic()
+                        result = retrieve(query, chunks, fts_lookup(search_terms), embedder)
+                        retrieve_ms = int((time.monotonic() - retrieve_started) * 1000)
+                        overview = mode in {"outline", "quiz", "explain"} and not search_terms
+                        if overview and chunks:
+                            # Evenly sampled excerpts are explicit, never called a full-book summary.
+                            indices = sorted({round(i * (len(chunks) - 1) / min(5, len(chunks) - 1))
+                                              for i in range(min(6, len(chunks)))}) if len(chunks) > 1 else [0]
+                            result["hits"] = [chunks[index] for index in indices]
+                        retrieval = {key: result[key] for key in ("backend", "degraded")}
+                        retrieval["scope"] = "selected-excerpts" if overview else "retrieved-excerpts"
+                        retrieval["section"] = section
+                        hit_count = len(result["hits"])
+                        retrieval["hits"] = hit_count
+                        retrieval["retrieve_ms"] = retrieve_ms
+                        retrieval["terms"] = search_terms[:24]
+                        stage_text = (f"已定位 {hit_count} 段相关原文，正在核对引用并生成回答…" if hit_count
+                                      else "未检索到直接相关的原文，正在整理回答…")
+                        yield sse({"type": "status", "stage": "generate", "text": stage_text, "hits": hit_count})
+                        if mode != "quiz":
+                            try:
+                                for kind, value in tutor.generate_stream(question, mode, book["title"], result["hits"],
+                                                                         previous, retrieval, user_key, summary):
+                                    if kind == "delta":
+                                        streamed = True
+                                        yield sse({"type": "delta", "text": value})
+                                    else:
+                                        answer = value
+                            except TutorError:
+                                if streamed:
+                                    raise
+                                # Streaming failed before any text arrived; retry one-shot.
+                                answer = tutor.generate(question, mode, book["title"], result["hits"], previous, retrieval, user_key, summary)
+                        else:
+                            answer = tutor.generate(question, mode, book["title"], result["hits"], previous, retrieval, user_key, summary)
                 except TutorError as exc:
                     add_log("chat_error", level="error",
                             detail=f"生成失败 · {str(exc)[:200]} · 问: {question[:60]}", owner_id=owner)
@@ -823,11 +1006,54 @@ def create_app(test_config=None):
                         db.execute("UPDATE conversations SET title=? WHERE id=? AND book_id=? AND owner_id=?",
                                    (question[:40], conversation_id, book_id, owner))
                 channel = "语义向量已启用" if not retrieval["degraded"] else "语义向量不可用（关键词检索）"
+                searches_note = f" · 自主检索 {retrieval['searches']} 次" if retrieval.get("searches") else ""
+                web_note = f" · 联网 {retrieval['web_searches']} 次" if retrieval.get("web_searches") else ""
                 add_log("chat", level="warning" if retrieval["degraded"] else "info",
-                        detail=(f"《{book['title']}》· {channel} · 命中 {hit_count} 段 · "
+                        detail=(f"《{book['title']}》· {channel} · 命中 {hit_count} 段{searches_note}{web_note} · "
                                 f"检索 {retrieve_ms}ms · 生成 {retrieval.get('generate_ms', 0) / 1000:.1f}s · 问: {question[:60]}"),
                         owner_id=owner)
                 yield sse({"type": "answer", "message": answer, "user_message": user_message})
+                # Rolling compaction for long conversations: once the part not
+                # covered by the stored summary passes a character budget, one
+                # extra model call condenses the older turns. It runs after the
+                # answer is delivered and can never fail this request.
+                history, live_summary, live_mark = [], summary, summary_mark
+                try:
+                    with guard:
+                        circuit = compact_circuits.setdefault(conversation_id, {})
+                    history = [dict(row) for row in reversed(old)] + [user_message, answer]
+                    if should_compact(history, summary_mark) and not compaction_circuit_open(circuit):
+                        outcome = compact_conversation(
+                            history, summary, lambda prompt_messages: tutor.summarize(prompt_messages, user_key))
+                        if outcome:
+                            new_summary, mark = outcome
+                            with database.connect() as db:
+                                db.execute("UPDATE conversations SET summary=?, summary_mark=? "
+                                           "WHERE id=? AND book_id=? AND owner_id=?",
+                                           (new_summary, mark, conversation_id, book_id, owner))
+                            record_compaction_result(circuit, success=True)
+                            add_log("compaction",
+                                    detail=f"《{book['title']}》· 摘要 {len(new_summary)} 字 · 压缩 {len(history)} 条中较早部分",
+                                    owner_id=owner)
+                            live_summary, live_mark = new_summary, mark
+                            yield sse({"type": "compacted", "summary_chars": len(new_summary)})
+                        else:
+                            record_compaction_result(circuit, success=False)
+                            add_log("compaction", level="warning",
+                                    detail=f"摘要为空或过长已跳过 · 问: {question[:60]}", owner_id=owner)
+                except Exception:
+                    with guard:
+                        circuit = compact_circuits.setdefault(conversation_id, {})
+                    record_compaction_result(circuit, success=False)
+                    LOG.exception("conversation compaction failed; keeping conversation as-is")
+                    add_log("compaction", level="warning",
+                            detail=f"压缩失败，对话保持原样 · 问: {question[:60]}", owner_id=owner)
+                # Context meter update: what the next turn will carry after
+                # any compaction above. Emitted even without compaction so the
+                # client's counter stays in step with every answer.
+                usage = context_usage(history, live_mark)
+                usage["summary_chars"] = len(live_summary)
+                yield sse({"type": "context", "context": usage})
             finally:
                 model_slots.release()
                 if book_lock is not None:
@@ -841,43 +1067,47 @@ def create_app(test_config=None):
         with database.connect() as db:
             row = db.execute("SELECT * FROM books WHERE owner_id=? AND title=?",
                              (BUILTIN_OWNER, title)).fetchone()
-            if row is not None and row["status"] == "ready":
-                source = root / row["source_path"]
-                if source.is_file() and source.read_bytes() == path.read_bytes():
-                    return
-            if row is None:
-                book_id = uid()
-                folder = root / "sources" / BUILTIN_OWNER
-                folder.mkdir(parents=True, exist_ok=True)
-                source = folder / (book_id + path.suffix.lower())
-                shutil.copyfile(path, source)
-                db.execute("INSERT INTO books(id,owner_id,title,filename,source_path,created_at) VALUES(?,?,?,?,?,?)",
-                           (book_id, BUILTIN_OWNER, title, path.name, str(source.relative_to(root)), now()))
-            else:
-                book_id = row["id"]
-                source = root / row["source_path"]
-                if not source.is_file() or source.read_bytes() != path.read_bytes():
-                    shutil.copyfile(path, source)
-                # Old citations must never refer to new chunks after a content update.
-                db.execute("DELETE FROM conversations WHERE book_id=?", (book_id,))
+        book_id = row["id"] if row is not None else uid()
         book_lock = lock_for(book_locks, book_id)
-        if not book_lock.acquire(blocking=False):
-            LOG.warning("Builtin book busy; deferring to next boot: %s", title)
-            return
-        # The seed thread is a dedicated daemon and may wait its turn: a blocking
-        # acquire serialises multiple builtin books instead of deferring all but
-        # the first to a next boot that may never come.
-        index_slots.acquire()
+        # Dedicated seed thread may wait; a busy reader must not skip the update
+        # until the next boot. HTTP handlers keep their nonblocking acquire.
+        book_lock.acquire()
+        queued, reserved = False, False
         try:
+            # Source replacement and index changes share the reader's book lock.
             with database.connect() as db:
-                db.execute("UPDATE books SET status='queued',error='' WHERE id=? AND owner_id=?",
-                           (book_id, BUILTIN_OWNER))
+                row = db.execute("SELECT * FROM books WHERE id=? AND owner_id=?",
+                                 (book_id, BUILTIN_OWNER)).fetchone()
+                if row is not None and row["status"] == "ready":
+                    source = root / row["source_path"]
+                    if row["filename"] == path.name and source.is_file() and source.read_bytes() == path.read_bytes():
+                        return
+                if row is None:
+                    folder = root / "sources" / BUILTIN_OWNER
+                    folder.mkdir(parents=True, exist_ok=True)
+                    source = folder / (book_id + path.suffix.lower())
+                    shutil.copyfile(path, source)
+                    db.execute("INSERT INTO books(id,owner_id,title,filename,source_path,created_at) VALUES(?,?,?,?,?,?)",
+                               (book_id, BUILTIN_OWNER, title, path.name, str(source.relative_to(root)), now()))
+                else:
+                    source = root / row["source_path"]
+                    if not source.is_file() or source.read_bytes() != path.read_bytes():
+                        shutil.copyfile(path, source)
+                    # Old citations must never refer to new chunks after a content update.
+                    db.execute("DELETE FROM conversations WHERE book_id=?", (book_id,))
+                db.execute("UPDATE books SET status='queued',error='',filename=? WHERE id=? AND owner_id=?",
+                           (path.name, book_id, BUILTIN_OWNER))
+            # The dedicated seed thread may wait without delaying web requests.
+            index_slots.acquire()
+            reserved = True
             LOG.info("Seeding builtin book: %s", title)
             executor.submit(index_book, BUILTIN_OWNER, book_id, source, path.name, book_lock)
-        except Exception:
-            book_lock.release()
-            index_slots.release()
-            raise
+            queued = True
+        finally:
+            if not queued:
+                book_lock.release()
+                if reserved:
+                    index_slots.release()
 
     def seed_builtin_books():
         # Baked-in textbooks ship with the image; every account can read them.
@@ -886,7 +1116,7 @@ def create_app(test_config=None):
             return
         try:
             with database.connect() as db:
-                db.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?)",
+                db.execute("INSERT OR IGNORE INTO users(id,username,username_key,password_hash,created_at) VALUES(?,?,?,?,?)",
                            (BUILTIN_OWNER, "内置教材库", "builtin-library",
                             generate_password_hash(secrets.token_hex(32)), now()))
         except Exception:
@@ -959,6 +1189,9 @@ def create_app(test_config=None):
         # lose data (a period is folded as soon as it is fully elapsed).
         while not stop.wait(21600):
             refresh_feedback_stats()
+
+    register_reader_routes(app, database, root, book_row,
+                           lambda book_id: lock_for(book_locks, book_id), body, throttle, now, uid)
 
     seeder = threading.Thread(target=seed_builtin_books, name="builtin-seed", daemon=True)
     seeder.start()

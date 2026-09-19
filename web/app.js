@@ -1,10 +1,12 @@
+import { createReader } from './reader.js';
+
 const $ = (selector) => document.querySelector(selector);
 const state = {
   user: null, csrf: '', config: null, books: [], book: null, sections: [],
   conversations: [], conversation: null, messages: [], mode: 'qa', epoch: 0,
   pending: false, loading: false, registering: false, registrationOpen: false,
-  testCodeRegistration: false, inviteRequired: false, controllers: new Set(), poll: null,
-  statusText: '', typing: null, streamText: '',
+  testCodeRegistration: false, apiKeySet: false, controllers: new Set(), poll: null,
+  statusText: '', typing: null, streamText: '', searchSteps: [], context: null,
 };
 const modeNames = { qa: '教材问答', explain: '章节讲解', outline: '要点梳理', quiz: '自测练习' };
 const statusNames = { queued: '等待索引', indexing: '正在建立索引', ready: '可以学习', error: '索引失败' };
@@ -34,6 +36,8 @@ function invalidate() {
   state.statusText = '';
   state.typing = null;
   state.streamText = '';
+  state.searchSteps = [];
+  state.context = null;
   clearTimeout(streamRenderTimer);
   streamRenderTimer = null;
   clearTimeout(state.poll);
@@ -153,12 +157,13 @@ function panel(name) {
 
 function clearEvidence() {
   evidenceSequence += 1;
+  readerUI.reset();
   const container = $('#evidence-content');
   container.replaceChildren();
   const empty = element('div', 'evidence-empty');
   empty.append(element('span', 'margin-line'), element('h3', '', '答案不是终点，\n原文才是起点。'),
-    element('p', '', '点击回答中的引用标记，在这里核对章节与原文段落。'),
-    element('small', '', 'Markdown 没有可靠页码，我们只标注真实的章节和分块位置。'));
+    element('p', '', '点击回答中的引用标记，或直接选择“阅读全文”，在这里通读整本书并添加私人批注。'),
+    element('small', '', 'Markdown 没有可靠页码，我们只标注真实的章节和正文位置。'));
   container.append(empty);
 }
 
@@ -170,11 +175,11 @@ function setAuthMode() {
   $('#auth-submit').textContent = state.registering ? '创建账户' : '登录';
   $('#auth-toggle').textContent = state.registering ? '已有账户？返回登录' : '还没有账户？创建书架';
   $('#auth-toggle').hidden = !canRegister;
-  $('#invite-label').hidden = !(state.registering && state.inviteRequired);
-  $('#invite-code').required = state.registering && state.inviteRequired;
-  const codeEntry = state.registering && !state.registrationOpen && state.testCodeRegistration;
+  const codeEntry = state.registering && state.testCodeRegistration;
   $('#test-code-label').hidden = !codeEntry;
-  $('#test-code').required = codeEntry;
+  $('#test-code').required = false;
+  $('#api-key-label').hidden = !(state.registering && state.registrationOpen);
+  $('#api-key').required = false;
   $('#password').autocomplete = state.registering ? 'new-password' : 'current-password';
   $('#auth-error').textContent = '';
 }
@@ -192,8 +197,8 @@ function showAuth() {
   state.messages = [];
   $('#question').value = '';
   $('#password').value = '';
-  $('#invite-code').value = '';
   $('#test-code').value = '';
+  $('#api-key').value = '';
   $('#upload-form').reset();
   if ($('#upload-dialog').open) $('#upload-dialog').close();
   $('#workspace').hidden = true;
@@ -210,7 +215,7 @@ async function loadIdentity() {
   state.csrf = data.csrf_token;
   state.registrationOpen = data.registration_open;
   state.testCodeRegistration = data.test_code_registration;
-  state.inviteRequired = data.invite_required;
+  state.apiKeySet = data.api_key_set;
   setAuthMode();
   if (data.user) await enterWorkspace(data.user);
 }
@@ -222,12 +227,16 @@ async function enterWorkspace(user) {
   $('#workspace').hidden = false;
   $('#account-name').textContent = user.username;
   $('#password').value = '';
-  $('#invite-code').value = '';
   $('#test-code').value = '';
+  $('#api-key').value = '';
   state.config = await api('/api/config');
   const warning = $('#config-warning');
   warning.hidden = state.config.llm_configured;
   warning.textContent = '问答模型尚未配置。你仍可上传教材；部署者需在 Railway 设置 STUDY_LLM_BASE_URL、STUDY_LLM_API_KEY 和 STUDY_LLM_MODEL。';
+  // The web supplement toggle only exists when the deployment configured the
+  // search MCP; it stays off by default every session.
+  $('#web-toggle-label').hidden = !state.config.web_search_configured;
+  $('#web-search-toggle').checked = false;
   renderBook();
   await refreshBooks();
 }
@@ -249,7 +258,7 @@ function renderLibrary() {
     info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
       book.status === 'ready' ? `${book.section_count} 个章节 · ${book.chunk_count} 段` : statusNames[book.status] || book.status));
     button.append(element('span', 'book-spine', book.title.slice(0, 1) || '书'), info);
-    action(button, 'click', () => selectBook(book.id));
+    action(button, 'click', () => selectBook(book.id, true, true));
     list.append(button);
   });
 }
@@ -293,7 +302,7 @@ function resetStudy() {
   clearEvidence();
 }
 
-async function selectBook(bookId, showPanel = true) {
+async function selectBook(bookId, showPanel = true, openReader = false) {
   const epoch = invalidate();
   resetStudy();
   state.book = state.books.find((book) => book.id === bookId) || null;
@@ -314,6 +323,7 @@ async function selectBook(bookId, showPanel = true) {
       const history = await api(`/api/books/${bookId}/conversations/${data.conversations[0].id}`);
       state.conversation = history.conversation;
       state.messages = history.messages;
+      state.context = history.context || null;
       renderConversations();
     }
   } finally {
@@ -321,6 +331,9 @@ async function selectBook(bookId, showPanel = true) {
       state.loading = false;
       renderBook();
       schedulePoll();
+      // A shelf click drops the reader straight into the book's full text;
+      // background re-selects (poll, upload, reindex) keep the study panel.
+      if (openReader && state.book?.status === 'ready') await readerUI.open(state.book.id);
     }
   }
 }
@@ -340,7 +353,7 @@ async function selectConversation(conversationId) {
   state.conversation = null;
   state.loading = true;
   $('#question').value = '';
-  clearEvidence();
+  if (!readerUI.preserveForConversation()) clearEvidence();
   renderMessages();
   updateComposer();
   try {
@@ -348,6 +361,9 @@ async function selectConversation(conversationId) {
       const data = await api(`/api/books/${bookId}/conversations/${conversationId}`);
       state.conversation = data.conversation;
       state.messages = data.messages;
+      state.context = data.context || null;
+    } else {
+      state.context = null;
     }
   } finally {
     if (epoch === state.epoch) {
@@ -372,6 +388,27 @@ async function deleteConversation() {
   await selectConversation(remaining ? remaining.id : '');
 }
 
+// Context meter: un-compacted conversation chars against the compaction
+// threshold. Compaction folds older turns into a summary, so the counter
+// drops after each compression instead of growing forever.
+function renderContextMeter() {
+  const box = $('#context-meter');
+  const context = state.context;
+  if (!state.conversation || !context) { box.hidden = true; return; }
+  box.hidden = false;
+  const threshold = context.threshold || 1;
+  const pending = context.pending_chars || 0;
+  const fill = box.querySelector('.context-fill');
+  fill.style.width = Math.min(100, Math.round((pending / threshold) * 100)) + '%';
+  fill.className = 'context-fill' + (pending >= threshold ? ' over' : pending >= threshold * 0.8 ? ' near' : '');
+  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n));
+  box.querySelector('.context-text').textContent = `上下文 ${fmt(pending)}/${fmt(threshold)}`;
+  const summary = context.summary_chars || 0;
+  box.title = summary
+    ? `未压缩上下文 ${pending} 字（阈值 ${threshold} 字，达到后自动压缩较早问答）；已压缩摘要 ${summary} 字`
+    : `未压缩上下文 ${pending} 字（阈值 ${threshold} 字，达到后自动压缩较早问答）`;
+}
+
 function updateComposer() {
   const ready = state.book?.status === 'ready' && !state.loading;
   $('#question').disabled = !ready || state.pending;
@@ -379,10 +416,15 @@ function updateComposer() {
   $('#cancel-send').hidden = !state.pending;
   $('#messages').setAttribute('aria-busy', String(state.pending || state.loading));
   $('#section-select').disabled = state.pending || state.loading;
+  $('#web-search-toggle').disabled = state.pending || state.loading;
   $('#scope-label').textContent = ready ? `仅检索：${$('#section-select').value || state.book.title}` : '先选择一本完成索引的教材';
+  $('#composer-note').textContent = $('#web-search-toggle').checked
+    ? '回答以当前教材为主 · 勾选联网后 W 标注内容来自网络，需自行核实 · 引用仍需核对'
+    : '仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见';
   $('#new-conversation').disabled = !ready || state.pending;
   $('#delete-conversation').disabled = !ready || !state.conversation || state.pending;
   document.querySelectorAll('[data-mode]').forEach((button) => { button.disabled = state.pending; });
+  renderContextMeter();
 }
 
 function renderBook() {
@@ -392,6 +434,8 @@ function renderBook() {
     ? `${book.section_count} 个章节 · ${book.chunk_count} 段原文 · ${book.index_backend.startsWith('vector') ? '语义 + 关键词混合检索' : '关键词检索（未启用语义向量）'}`
     : `${statusNames[book.status] || book.status} · 大部头教材首次索引需要一些时间`) : '上传已完成 OCR 的 Markdown，或选择书架中的教材。';
   $('#book-actions').hidden = !book;
+  $('#read-book').hidden = !book || book.status !== 'ready';
+  $('#book-notes').hidden = !book || book.status !== 'ready';
   $('#study-controls').hidden = !book || book.status !== 'ready';
   $('#book-error').hidden = !book?.error;
   $('#book-error').textContent = book?.error || '';
@@ -432,16 +476,30 @@ function renderEmpty() {
       button.addEventListener('click', () => { setMode(mode); $('#question').value = prompt; $('#question').focus(); });
       suggestions.append(button);
     });
+    const readButton = element('button', 'suggestion', '不提问，直接通读原文');
+    readButton.append(element('span', '', '阅读全文 →'));
+    readButton.addEventListener('click', () => readerUI.open(state.book.id, { expanded: true }));
+    suggestions.append(readButton);
     container.append(suggestions);
   }
   return container;
 }
 
-const CITATION_PATTERN = /\[(C\d+)\]/g;
+const CITATION_PATTERN = /\[([CW]\d+)\]/g;
 
 function citationButton(label, references, message) {
   const reference = references.find((item) => item.label === label);
   if (!reference) return document.createTextNode('');
+  if (reference.kind === 'web') {
+    // Web supplements open their source page; they never route into the book reader.
+    const button = element('button', 'citation web', `[${label}]`);
+    button.title = `网络来源${reference.site ? ` · ${reference.site}` : ''}${reference.title ? ` · ${reference.title}` : ''}（不属于教材，请自行核实）`;
+    action(button, 'click', () => {
+      if (reference.url) window.open(reference.url, '_blank', 'noopener,noreferrer');
+      else toast('该网络来源未提供链接。');
+    });
+    return button;
+  }
   const button = element('button', 'citation', `[${label}]`);
   button.title = `${reference.section} · 段落 ${reference.ordinal}`;
   const bookId = state.book.id;
@@ -536,6 +594,16 @@ function startTyping(message) {
   }, 16);
 }
 
+// One-line description of a search_book / web_search tool call (live step or
+// saved trace).
+function searchStepText(step, index) {
+  const label = step.query || '无效请求';
+  const prefix = step.web ? '联网检索' : (step.auto ? '自动检索' : '检索');
+  const unit = step.web ? ' 条来源' : ' 段';
+  const outcome = step.error ? '调用被拒绝' : `命中 ${step.count}${unit}`;
+  return `${index + 1}. ${prefix}「${label}」· ${outcome}`;
+}
+
 function renderAssistantBody(article, message, reveal) {
   const references = message.citations || [];
   const typing = Boolean(reveal);
@@ -563,10 +631,25 @@ function renderAssistantBody(article, message, reveal) {
   if (!typing) {
     if (message.notice) article.append(element('p', 'answer-notice', message.notice));
     if (message.retrieval?.degraded) article.append(element('p', 'answer-notice', '本次使用关键词检索，语义向量不可用。'));
+    // The model's search_book calls stay reviewable under the answer.
+    const steps = message.retrieval?.steps;
+    if (Array.isArray(steps) && steps.length) {
+      const trace = element('details', 'search-trace');
+      const refused = steps.filter((step) => step.error).length;
+      const summary = refused
+        ? `模型自主检索 ${steps.length} 次（含 ${refused} 次被拒绝的调用）`
+        : `模型自主检索 ${steps.length} 次`;
+      trace.append(element('summary', '', summary));
+      steps.forEach((step, index) => trace.append(element('div', 'search-trace-row'
+        + (step.error ? ' error' : ''), searchStepText(step, index))));
+      article.append(trace);
+    }
     if (devMode() && message.retrieval) {
       const meta = message.retrieval;
       const bits = [`通道 ${meta.backend}`, meta.degraded ? '语义向量未启用' : '语义向量已启用'];
       if (meta.hits != null) bits.push(`命中 ${meta.hits} 段`);
+      if (meta.searches != null) bits.push(`自主检索 ${meta.searches} 次`);
+      if (meta.web_searches != null) bits.push(`联网 ${meta.web_searches} 次`);
       if (meta.retrieve_ms != null) bits.push(`检索 ${meta.retrieve_ms}ms`);
       if (meta.generate_ms != null) bits.push(`生成 ${(meta.generate_ms / 1000).toFixed(1)}s`);
       article.append(element('p', 'answer-debug', bits.join(' · ')));
@@ -647,135 +730,27 @@ function renderMessages() {
     container.append(live);
   }
   if (state.typing) container.append(element('p', 'waiting', '点击可立即显示全部内容'));
-  if (state.pending) container.append(element('p', 'waiting', state.statusText || '正在检索本书，并核对回答引用…'));
+  if (state.pending) {
+    // Live tool-call trace: every search_book call stays visible while waiting.
+    if (state.searchSteps.length) {
+      const trace = element('div', 'search-steps');
+      state.searchSteps.forEach((step, index) => trace.append(
+        element('span', 'search-step' + (step.error ? ' error' : ''), searchStepText(step, index))));
+      container.append(trace);
+    }
+    container.append(element('p', 'waiting', state.statusText || '正在检索本书，并核对回答引用…'));
+  }
   if (follow) container.scrollTop = container.scrollHeight;
 }
 
-// Merged [start, end) ranges of query-term occurrences, case-insensitive.
-function highlightRanges(text, terms) {
-  const ranges = [];
-  const lower = text.toLowerCase();
-  for (const term of terms || []) {
-    const needle = String(term).toLowerCase();
-    if (needle.length < 2) continue;
-    let from = 0;
-    for (;;) {
-      const at = lower.indexOf(needle, from);
-      if (at < 0) break;
-      ranges.push([at, at + needle.length]);
-      from = at + needle.length;
-    }
-  }
-  ranges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const merged = [];
-  for (const range of ranges) {
-    const last = merged[merged.length - 1];
-    if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
-    else merged.push([range[0], range[1]]);
-  }
-  return merged;
-}
+const readerUI = createReader({
+  api, element, panel, toast,
+  getBook: () => state.book,
+  getEpoch: () => state.epoch,
+});
 
-// Validated [start, end) sentence ranges coming from the match endpoint.
-function sentenceRanges(text, sentences) {
-  return (sentences || []).filter((range) => Array.isArray(range) && range.length === 2
-    && Number.isInteger(range[0]) && Number.isInteger(range[1])
-    && range[0] >= 0 && range[1] > range[0] && range[1] <= text.length);
-}
-
-// Reference text with keyword marks (exact term hits) and sentence marks
-// (semantically closest to the question). Where both overlap, the keyword
-// mark wins: it is the more specific highlight.
-function referenceTextNode(text, terms, sentences) {
-  const node = element('div', 'reference-text');
-  const termRanges = highlightRanges(text, terms);
-  const semanticRanges = sentenceRanges(text, sentences);
-  const cuts = new Set([0, text.length]);
-  termRanges.forEach(([start, end]) => { cuts.add(start); cuts.add(end); });
-  semanticRanges.forEach(([start, end]) => { cuts.add(start); cuts.add(end); });
-  const points = [...cuts].sort((a, b) => a - b);
-  const covered = (ranges, at) => ranges.some(([start, end]) => at >= start && at < end);
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const start = points[i];
-    const piece = text.slice(start, points[i + 1]);
-    if (!piece) continue;
-    if (covered(termRanges, start)) node.append(element('mark', 'reference-hit', piece));
-    else if (covered(semanticRanges, start)) node.append(element('mark', 'reference-sentence', piece));
-    else node.append(document.createTextNode(piece));
-  }
-  return node;
-}
-
-// The question that produced this assistant message (nearest preceding user turn).
-function questionFor(message) {
-  const index = state.messages.indexOf(message);
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (state.messages[i].role === 'user') return state.messages[i].content;
-  }
-  return '';
-}
-
-function evidenceFooter(termHits, sentenceHits) {
-  const note = '段落编号是索引位置，不是原书页码；OCR 错误需回到源文件修正。';
-  if (termHits && sentenceHits) return '米色词为检索关键词命中，淡蓝整句为与问题语义最相关的句子。' + note;
-  if (sentenceHits) return '淡蓝整句为与问题语义最相关的句子。' + note;
-  if (termHits) return '高亮处为本次提问的检索关键词命中位置。' + note;
-  return '这里展示实际入库的文本分块。' + note;
-}
-
-function renderEvidence(chunk, reference, terms, sentences, prev, next) {
-  const termHits = highlightRanges(chunk.text, terms).length > 0;
-  const sentenceHits = sentenceRanges(chunk.text, sentences).length > 0;
-  const nav = element('div', 'reference-nav');
-  const prevButton = element('button', 'reference-nav-button' + (prev ? '' : ' disabled'),
-    prev ? `← 上一段（${prev.ordinal}）` : '← 已是开头');
-  prevButton.disabled = !prev;
-  action(prevButton, 'click', () => showEvidence(state.book.id,
-    { ...reference, chunk_id: prev.id }, reference.message));
-  const nextButton = element('button', 'reference-nav-button' + (next ? '' : ' disabled'),
-    next ? `下一段（${next.ordinal}）→` : '已是结尾 →');
-  nextButton.disabled = !next;
-  action(nextButton, 'click', () => showEvidence(state.book.id,
-    { ...reference, chunk_id: next.id }, reference.message));
-  nav.append(prevButton, nextButton);
-  $('#evidence-content').replaceChildren(
-    element('span', 'reference-label', `${reference.label} / 原文段落 ${chunk.ordinal}`),
-    element('h3', 'reference-title', state.book.title),
-    element('p', 'reference-section', chunk.section),
-    referenceTextNode(chunk.text, terms, sentences),
-    nav,
-    element('p', 'reference-foot', evidenceFooter(termHits, sentenceHits)));
-}
-
-async function showEvidence(bookId, reference, message) {
-  if (bookId !== state.book?.id) return;
-  // Neighbour paging keeps the original message so highlights survive browsing.
-  reference.message = message;
-  const sequence = ++evidenceSequence;
-  panel('evidence');
-  $('#evidence-content').replaceChildren(element('p', 'muted', '正在读取原文…'));
-  let chunk, prev, next;
-  try {
-    ({ chunk, prev, next } = await api(`/api/books/${bookId}/chunks/${reference.chunk_id}`));
-  } catch (error) {
-    if (sequence === evidenceSequence && bookId === state.book?.id) {
-      $('#evidence-content').replaceChildren(element('p', 'form-error', error.message || '无法读取原文，请重试。'));
-    }
-    throw error;
-  }
-  if (sequence !== evidenceSequence || bookId !== state.book?.id) return;
-  // Keyword marks render immediately; the semantic pass refines afterwards.
-  const terms = message?.retrieval?.terms || [];
-  renderEvidence(chunk, reference, terms, [], prev, next);
-  const question = message ? questionFor(message) : '';
-  if (!question) return;
-  try {
-    const data = await api(`/api/books/${bookId}/chunks/${reference.chunk_id}/match`,
-      { method: 'POST', body: { question } });
-    if (sequence === evidenceSequence && bookId === state.book?.id && data.ranges?.length) {
-      renderEvidence(chunk, reference, terms, data.ranges, prev, next);
-    }
-  } catch { /* Semantic highlighting is best-effort; keyword marks stay. */ }
+function showEvidence(bookId, reference) {
+  return readerUI.open(bookId, { anchor: reference.chunk_id });
 }
 
 function openUpload() {
@@ -790,13 +765,17 @@ $('#auth-form').addEventListener('submit', async (event) => {
   $('#auth-toggle').disabled = true;
   $('#auth-error').textContent = '';
   try {
+    if (state.registering && !$('#test-code').value.trim() && !$('#api-key').value.trim()) {
+      if (state.registrationOpen) throw new Error('请填写测试码或 API Key 其中之一。');
+      throw new Error('请填写测试码。');
+    }
     if (!state.csrf) {
       const identity = await api('/api/auth/me');
       state.csrf = identity.csrf_token;
     }
     const data = await api(`/api/auth/${state.registering ? 'register' : 'login'}`, { method: 'POST', body: {
-      username: $('#username').value.trim(), password: $('#password').value, invite_code: $('#invite-code').value,
-      test_code: $('#test-code').value.trim(),
+      username: $('#username').value.trim(), password: $('#password').value,
+      test_code: $('#test-code').value.trim(), api_key: $('#api-key').value.trim(),
     } });
     state.csrf = data.csrf_token;
     await enterWorkspace(data.user);
@@ -820,8 +799,8 @@ $('#upload-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = $('#book-file').files[0];
   if (!file) return;
-  if (!/\.(md|markdown|txt)$/i.test(file.name) || file.size > 20 * 1024 * 1024) {
-    $('#upload-error').textContent = '请选择不超过 20 MB 的 Markdown 或 TXT 文件。';
+  if (!/\.(md|markdown|txt|docx)$/i.test(file.name) || file.size > 20 * 1024 * 1024) {
+    $('#upload-error').textContent = '请选择不超过 20 MB 的 Markdown、TXT 或 DOCX 文件。';
     return;
   }
   $('#upload-submit').disabled = true;
@@ -854,13 +833,16 @@ action($('#reindex'), 'click', async () => {
   toast('已重新加入索引队列。');
 });
 action($('#conversation-select'), 'change', () => selectConversation($('#conversation-select').value));
+action($('#read-book'), 'click', () => state.book && readerUI.open(state.book.id, { expanded: true }));
+action($('#book-notes'), 'click', () => state.book && readerUI.open(state.book.id, { notes: true }));
 action($('#new-conversation'), 'click', () => selectConversation(''));
 action($('#delete-conversation'), 'click', deleteConversation);
 $('#section-select').addEventListener('change', () => {
   $('#question').value = '';
   updateComposer();
-  clearEvidence();
+  if (!readerUI.isFocused()) clearEvidence();
 });
+$('#web-search-toggle').addEventListener('change', () => updateComposer());
 $('#question').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -877,6 +859,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
   const section = $('#section-select').value || null;
   state.pending = true;
   state.statusText = '';
+  state.searchSteps = [];
   $('#question').value = '';
   const optimistic = { role: 'user', content: question, mode, created_at: null };
   state.messages.push(optimistic);
@@ -890,9 +873,13 @@ $('#chat-form').addEventListener('submit', async (event) => {
       renderConversations();
     }
     const cid = state.conversation.id;
-    await streamChat(`/api/books/${bookId}/conversations/${cid}/messages`, { message: question, mode, section }, (evt) => {
+    await streamChat(`/api/books/${bookId}/conversations/${cid}/messages`,
+      { message: question, mode, section, web: $('#web-search-toggle').checked }, (evt) => {
       if (epoch !== state.epoch) return;
       if (evt.type === 'status') {
+        // A new agent search round invalidates the previous preview text.
+        if (evt.reset) state.streamText = '';
+        if (evt.search) state.searchSteps.push({ ...evt.search });
         state.statusText = evt.text;
         renderMessages();
       } else if (evt.type === 'delta') {
@@ -918,6 +905,15 @@ $('#chat-form').addEventListener('submit', async (event) => {
         // the server fell back to one-shot generation.
         if (streamed) renderMessages();
         else startTyping(evt.message);
+      } else if (evt.type === 'context') {
+        // Live context meter: the un-compacted tail after this answer (and
+        // after any compaction the server ran before emitting it).
+        state.context = evt.context || null;
+        renderContextMeter();
+      } else if (evt.type === 'compacted') {
+        // The server condensed earlier turns into a rolling summary after the
+        // answer was delivered; future turns in this conversation can use it.
+        toast('本对话较长，已把较早的问答整理成摘要，后续回答可参考更早的内容。');
       } else if (evt.type === 'error') {
         throw new Error(evt.error);
       }
@@ -938,7 +934,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
       state.pending = false;
       state.statusText = '';
       renderBook();
-      $('#question').focus();
+      if (!readerUI.isFocused()) $('#question').focus();
       schedulePoll();
     }
   }
@@ -952,6 +948,7 @@ $('#messages').addEventListener('click', (event) => {
 action($('#cancel-send'), 'click', async () => {
   const cid = state.conversation?.id;
   invalidate();
+  readerUI.preserveForConversation();
   toast('已停止等待；后台请求可能仍会完成。稍后重新打开此对话即可查看。');
   renderBook();
   if (cid) await selectConversation(cid);
@@ -962,8 +959,9 @@ document.addEventListener('visibilitychange', () => {
 });
 
 const logEventNames = {
-  chat: '问答', chat_error: '问答失败', index_ready: '索引完成', index_error: '索引失败',
-  index_embed_fallback: '索引降级', request_error: '请求错误', login_failed: '登录失败',
+  chat: '问答', chat_error: '问答失败', agent_search: '工具检索', web_search: '联网检索',
+  index_ready: '索引完成', index_error: '索引失败', index_embed_fallback: '索引降级',
+  request_error: '请求错误', login_failed: '登录失败',
 };
 
 async function loadLogs() {
@@ -988,9 +986,24 @@ async function loadLogs() {
 $('#settings-open').addEventListener('click', () => {
   $('#dev-mode-toggle').checked = devMode();
   $('#settings-dialog').showModal();
+  $('#apikey-status').textContent = state.apiKeySet ? '已设置个人 API Key，问答使用你的密钥。' : '未设置：问答使用部署者的模型密钥。';
   loadLogs().catch(showError);
 });
 $('#settings-close').addEventListener('click', () => $('#settings-dialog').close());
+$('#apikey-save').addEventListener('click', async () => {
+  const key = $('#apikey-input').value.trim();
+  if (key && key.length < 8) { $('#apikey-status').textContent = 'API Key 至少 8 个字符。'; return; }
+  try {
+    const data = await api('/api/account/api-key', { method: 'POST', body: { api_key: key } });
+    state.apiKeySet = data.api_key_set;
+    $('#apikey-input').value = '';
+    $('#apikey-status').textContent = data.api_key_set
+      ? '已保存：后续问答使用你的 API Key。'
+      : '已清除：后续问答使用部署者的模型密钥。';
+  } catch (error) {
+    $('#apikey-status').textContent = error.message || '保存失败，请重试。';
+  }
+});
 $('#logs-refresh').addEventListener('click', () => loadLogs().catch(showError));
 $('#dev-mode-toggle').addEventListener('change', () => {
   localStorage.setItem('study.devMode', $('#dev-mode-toggle').checked ? '1' : '0');
