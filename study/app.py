@@ -222,6 +222,15 @@ def create_app(test_config=None):
             with database.connect() as db:
                 row = db.execute("SELECT id,username,api_key FROM users WHERE id=?", (user_id,)).fetchone()
                 g.user = dict(row) if row else None
+        # The deployer-only test-code report authenticates with its own key
+        # instead of a session; the route hides itself (404) when the key is
+        # unset or wrong.
+        if request.path == "/api/admin/test-codes":
+            expected = os.getenv("STUDY_ADMIN_KEY", "")
+            supplied = request.headers.get("X-Admin-Key", "")
+            if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
+                abort(404, description="不存在。")
+            return None
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             expected, actual = session.get("csrf", ""), request.headers.get("X-CSRF-Token", "")
             if not expected or not hmac.compare_digest(expected.encode(), actual.encode()):
@@ -388,6 +397,19 @@ def create_app(test_config=None):
                        embedding_backend="cloud" if embedder.configured else "lexical+fts5",
                        web_search_configured=searcher.configured,
                        max_upload_mb=20, formats=sorted(FORMATS))
+
+    @app.get("/api/admin/test-codes")
+    def admin_test_codes():
+        # Deployer-only report on invite-code usage; guarded in protect() by
+        # STUDY_ADMIN_KEY (X-Admin-Key header), never by a user session.
+        with database.connect() as db:
+            rows = db.execute("SELECT code,bound_username,bound_at FROM test_codes "
+                              "ORDER BY bound_username='', bound_username, code").fetchall()
+        codes = [{"code": row["code"], "bound": bool(row["bound_username"]),
+                  "username": row["bound_username"] or None, "bound_at": row["bound_at"] or None}
+                 for row in rows]
+        bound = sum(1 for item in codes if item["bound"])
+        return jsonify(total=len(codes), bound=bound, open=len(codes) - bound, codes=codes)
 
     @app.get("/api/logs")
     def logs():

@@ -1486,6 +1486,23 @@ class IsolationTests(unittest.TestCase):
         self.assertNotIn('"stage": "search"', body)
         self.assertEqual({hit["id"] for hit in seen}, {self.chunk_a})
 
+    def test_admin_test_codes_report_is_key_gated(self):
+        path = "/api/admin/test-codes"
+        # Unset key: the endpoint does not exist.
+        with patch.dict(os.environ, {"STUDY_ADMIN_KEY": ""}):
+            self.assertEqual(self.a.get(path).status_code, 404)
+            self.assertEqual(self.a.get(path, headers={"X-Admin-Key": "anything"}).status_code, 404)
+        # Wrong key hides it too; the right key reads every binding.
+        with patch.dict(os.environ, {"STUDY_ADMIN_KEY": "unit-admin-key-0123456789abcdef"}):
+            self.assertEqual(self.a.get(path, headers={"X-Admin-Key": "wrong"}).status_code, 404)
+            response = self.a.get(path, headers={"X-Admin-Key": "unit-admin-key-0123456789abcdef"})
+            self.assertEqual(response.status_code, 200)
+            data = response.get_json()
+            self.assertGreaterEqual(data["total"], data["bound"])
+            self.assertEqual(data["total"], data["bound"] + data["open"])
+            self.assertTrue(all(set(item) >= {"code", "bound", "username", "bound_at"}
+                                for item in data["codes"]))
+
     def test_invalid_section_and_mode_are_rejected(self):
         cid = self.conversation(self.book_a)
         for payload in ({"message": "管辖", "section": "不存在的章节"}, {"message": "管辖", "mode": []}):
