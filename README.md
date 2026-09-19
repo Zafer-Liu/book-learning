@@ -187,10 +187,6 @@ docs/             # topical docs (architecture / configuration / development / m
 builtin_books/    # builtin textbooks (local only, never in git)
 ```
 
-## History: the OpenClaw self-improvement hook
-
-This repository began as a self-improvement system for AI agents (bootstrap error detection, scheduled learning promotion, durable behavioural memory) — see [QUICKSTART.md](QUICKSTART.md) and `self-improvement/`. It runs separately from the study workspace; its historical plans do not describe current capabilities.
-
 ## License
 
 [GPL-3.0](LICENSE)

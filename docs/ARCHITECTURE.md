@@ -8,7 +8,7 @@
 
 书内 / BOOKNOTE 是按教材范围约束回答的多账户课程学习助手。账户可以读取共享内置书，或上传自己的文本教材；每轮提问只使用当前可访问书籍的分块，可进一步限定章节。
 
-主体为 Flask + SQLite + 原生 JavaScript/CSS，前后端同源部署。`self-improvement/` 是独立保留的 OpenClaw TypeScript Hook，不被课程助手导入，也不参与教材检索、用户反馈处理或答案生成。
+主体为 Flask + SQLite + 原生 JavaScript/CSS，前后端同源部署。
 
 ```text
 浏览器：web/index.html + app.js + reader.js + styles.css

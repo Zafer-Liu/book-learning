@@ -21,7 +21,7 @@ Copy-Item .env.example .env
 
 打开 `http://127.0.0.1:8080`。入口绑定回环地址且 `debug=False`，代码变更后需重新启动。首次启动还会播种内置教材，健康检查成功不代表教材已经 ready。未配模型时可查看书架等页面，但不能据此验收生成链路。
 
-`npm start` 只是 `python -m study` 的包装，使用 PATH 中的 Python；`npm run test:study` 包装 Python unittest。`npm run build` 用于旧 TypeScript Hook，不是课程助手启动或发布步骤。不要将根目录旧 Hook 的安装、训练或记忆流程套用到课程助手。
+`npm start` 只是 `python -m study` 的包装，使用 PATH 中的 Python；`npm run test:study` 包装 Python unittest。
 
 依赖使用版本范围，当前不是完整锁定的 Python 环境。更改依赖时应由开发者在隔离环境验证兼容性，并记录实际部署版本。
 

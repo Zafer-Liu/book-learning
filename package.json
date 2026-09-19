@@ -1,42 +1,14 @@
 {
-  "name": "self-learning-genius-agent",
+  "name": "book-learning",
   "version": "1.0.0",
-  "description": "Book-scoped RAG course tutor with multi-account Railway hosting and a preserved OpenClaw hook",
-  "main": "self-improvement/handler.ts",
-  "type": "module",
+  "description": "Book-scoped RAG course tutor with multi-account Railway hosting",
+  "license": "GPL-3.0",
   "scripts": {
     "start": "python -m study",
-    "test:study": "python -m unittest discover -s tests -v",
-    "build": "tsc",
-    "test": "node --test",
-    "lint": "eslint .",
-    "format": "prettier --write ."
-  },
-  "keywords": [
-    "agent",
-    "self-improvement",
-    "learning",
-    "error-detection",
-    "memory",
-    "openclaw"
-  ],
-  "author": "Your Name",
-  "license": "GPL-3.0",
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.0.0",
-    "eslint": "^8.0.0",
-    "prettier": "^3.0.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "test:study": "python -m unittest discover -s tests -v"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/self-learning-genius-agent.git"
-  },
-  "bugs": {
-    "url": "https://github.com/yourusername/self-learning-genius-agent/issues"
-  },
-  "homepage": "https://github.com/yourusername/self-learning-genius-agent#readme"
+    "url": "https://github.com/Zafer-Liu/book-learning.git"
+  }
 }

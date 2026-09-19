@@ -187,10 +187,6 @@ docs/             # 分专题文档(架构 / 配置 / 开发 / 维护)
 builtin_books/    # 内置教材(本地保留,不入 Git)
 ```
 
-## 历史:OpenClaw 自我改进 Hook
-
-仓库早期为一个面向 AI Agent 的自我改进系统(启动检测错误、定时提升经验、沉淀行为记忆),见 [QUICKSTART.md](QUICKSTART.md) 与 `self-improvement/`;它与课程助手分别运行,历史计划不代表现有能力。
-
 ## 许可证
 
 [GPL-3.0](LICENSE)
