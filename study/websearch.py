@@ -51,6 +51,11 @@ def _http_url(value):
     return value.strip()[:600] if parts.scheme in {"http", "https"} and parts.netloc else ""
 
 
+def _normalize(name: str) -> str:
+    """Fold camelCase / snake_case / kebab-case for tolerant tool matching."""
+    return name.lower().replace("_", "").replace("-", "")
+
+
 class WebSearchClient:
     def __init__(self):
         self.url = (os.getenv("STUDY_SEARCH_MCP_URL") or DEFAULT_MCP_URL).strip()
@@ -59,6 +64,7 @@ class WebSearchClient:
         self.session = requests.Session()
         self._guard = threading.Lock()
         self._mcp_session = ""
+        self._tool_name = TOOL_NAME
         self._query_field = ""
         self._count_field = ""
         self._rpc_id = 0
@@ -160,7 +166,9 @@ class WebSearchClient:
         self._discover_schema()
 
     def _discover_schema(self):
-        """Read the tool's input schema so argument names match the server."""
+        """Read the server's tool list: pick the real tool name (docs spell it
+        webSearchPrime, the server registers web_search_prime) and its input
+        schema so argument names match the server."""
         self._rpc_id += 1
         reply = self._post({"jsonrpc": "2.0", "id": self._rpc_id, "method": "tools/list"})
         if not isinstance(reply, dict) or "error" in reply:
@@ -168,8 +176,21 @@ class WebSearchClient:
         tools = ((reply.get("result") or {}).get("tools") or [])
         if not isinstance(tools, list):
             return
+        names = [tool.get("name") for tool in tools
+                 if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
+        chosen = next((name for name in names if name == TOOL_NAME), None)
+        if chosen is None:
+            # Normalized match folds camelCase / snake_case / kebab-case.
+            by_normalized = {_normalize(name): name for name in names}
+            chosen = by_normalized.get(_normalize(TOOL_NAME))
+        if chosen is None:
+            chosen = next((name for name in names if "search" in name.lower()), None)
+        if chosen is None:
+            LOG.warning("MCP server exposes no search tool; available: %s", names)
+            return
+        self._tool_name = chosen
         for tool in tools:
-            if not isinstance(tool, dict) or tool.get("name") != TOOL_NAME:
+            if not isinstance(tool, dict) or tool.get("name") != chosen:
                 continue
             properties = ((tool.get("inputSchema") or {}).get("properties") or {})
             if not isinstance(properties, dict):
@@ -186,7 +207,7 @@ class WebSearchClient:
         if self._count_field:
             arguments[self._count_field] = count
         request = {"jsonrpc": "2.0", "id": self._rpc_id, "method": "tools/call",
-                   "params": {"name": TOOL_NAME, "arguments": arguments}}
+                   "params": {"name": self._tool_name, "arguments": arguments}}
         reply = self._post(request)
         if reply is None:
             raise WebSearchError("MCP 工具调用无响应。")
@@ -194,7 +215,15 @@ class WebSearchClient:
             self._raise_protocol_error(reply)
         result = reply.get("result")
         if not isinstance(result, dict) or result.get("isError"):
-            raise WebSearchError("MCP 工具调用失败。")
+            # isError responses carry the server's reason as text blocks
+            # (e.g. "MCP error -401: Api key not found"); surface it instead
+            # of a generic failure so misconfiguration is diagnosable.
+            detail = ""
+            content = result.get("content") if isinstance(result, dict) else None
+            if isinstance(content, list):
+                detail = " ".join(_text(block.get("text"), 200) for block in content
+                                  if isinstance(block, dict))[:200].strip()
+            raise WebSearchError(f"MCP 工具调用失败:{detail or '未知错误'}")
         return result
 
     # ------------------------------------------------------------------

@@ -8,6 +8,7 @@ import re
 import requests
 
 from .rag import api_url
+from .websearch import WebSearchError
 
 LOG = logging.getLogger(__name__)
 
@@ -743,6 +744,12 @@ class Tutor:
         ctx["web_calls"] += 1
         try:
             hits = web_search(query)
+        except WebSearchError as exc:
+            # Configuration and quota problems carry their server-side reason
+            # (e.g. "-401 Api key not found"); pass it to the model and logs.
+            LOG.warning("agent web search failed: %s", exc)
+            return {"error": f"web search failed: {str(exc)[:180]}"}, \
+                   {"query": query[:60], "count": 0, "error": True, "web": True}
         except Exception:  # a broken search must not kill the loop
             LOG.exception("agent web search failed")
             return {"error": "web search failed"}, {"query": query[:60], "count": 0, "error": True, "web": True}

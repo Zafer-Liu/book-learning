@@ -222,8 +222,40 @@ class TransportTests(unittest.TestCase):
 
         for kind in ("rpc", "tool"):
             client = self.make_client(error_handler(kind))
-            with self.assertRaises(WebSearchError):
+            with self.assertRaises(WebSearchError) as caught:
                 client.search(ANY_QUERY)
+            if kind == "tool":
+                # isError text blocks surface verbatim so misconfiguration
+                # (quota, invalid key) is diagnosable from logs and replies.
+                self.assertIn("denied", str(caught.exception))
+
+    def test_tool_name_is_discovered_from_server(self):
+        # The docs spell the tool webSearchPrime, but the live server
+        # registers web_search_prime; the call must use the server's name.
+        state = {"calls": []}
+
+        def handler(payload):
+            method = payload.get("method")
+            if method == "initialize":
+                return FakeResponse(body=rpc({"sessionId": "s"}, rpc_id=payload["id"]))
+            if method == "notifications/initialized":
+                return FakeResponse(status_code=202)
+            if method == "tools/list":
+                schema = {"properties": {"search_query": {"type": "string"}}}
+                return FakeResponse(body=rpc({"tools": [
+                    {"name": "unrelated_tool", "inputSchema": {"properties": {}}},
+                    {"name": "web_search_prime", "inputSchema": schema}]}, rpc_id=payload["id"]))
+            if method == "tools/call":
+                state["calls"].append(payload)
+                return FakeResponse(body=rpc({"content": [{"type": "text",
+                                                          "text": json.dumps({"results": RESULTS})}]},
+                                             rpc_id=payload["id"]))
+            raise AssertionError(method)
+
+        client = self.make_client(handler)
+        self.assertEqual(len(client.search(QUERY)), 1)
+        self.assertEqual(state["calls"][0]["params"]["name"], "web_search_prime")
+        self.assertEqual(state["calls"][0]["params"]["arguments"], {"search_query": QUERY})
 
     def test_input_validation(self):
         client = self.make_client(self.happy_handler)
