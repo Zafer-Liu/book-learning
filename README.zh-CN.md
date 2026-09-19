@@ -153,6 +153,7 @@ python -m study
 | `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | 可选向量服务(OpenAI 兼容 `/embeddings`);更换模型后需重新索引 |
 | `STUDY_SEARCH_API_KEY` | 可选联网搜索:默认走智谱工具接口(`web-search-pro`,普通智谱 API Key 即可);设置 `STUDY_SEARCH_MCP_URL` 改走远程 MCP(需套餐专用 Key),`STUDY_SEARCH_BASE_URL` 可覆写接口地址;不配置则完全书内 |
 | `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | 注册策略:开放注册 / 一码一户测试码 / 邀请码 |
+| `STUDY_ADMIN_KEY` | 可选部署者密钥;设置后可用 `GET /api/admin/test-codes`(请求头 `X-Admin-Key`)查看测试码绑定报告,未设置或不匹配返回 404 |
 | `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | 默认 100 账户 / 每账户 20 本教材 |
 
 密钥只写环境变量(Railway Variables / 本地 `.env`),永不入库;`.env`、教材原文件、本地数据目录均被 Git 与 Docker 上下文排除。

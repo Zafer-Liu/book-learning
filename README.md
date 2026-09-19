@@ -153,6 +153,7 @@ Open `http://127.0.0.1:8080`. Regression tests: `python -m unittest discover -s 
 | `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | Optional embeddings (OpenAI-compatible `/embeddings`); reindex after changing the model |
 | `STUDY_SEARCH_API_KEY` | Optional web search: defaults to Zhipu's tools API (`web-search-pro`, any ordinary Zhipu API key works); set `STUDY_SEARCH_MCP_URL` to use a remote MCP instead (plan-specific key), `STUDY_SEARCH_BASE_URL` overrides the endpoint; unset = strictly book-scoped |
 | `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | Registration policy: open signup / one-code-one-account / invite code |
+| `STUDY_ADMIN_KEY` | Optional deployer key; when set, `GET /api/admin/test-codes` (header `X-Admin-Key`) reports code bindings; unset or wrong key returns 404 |
 | `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | Defaults: 100 accounts / 20 books per account |
 
 Secrets live only in environment variables (Railway Variables / local `.env`), never in git; `.env`, source books and local data directories are excluded from both Git and the Docker context.
