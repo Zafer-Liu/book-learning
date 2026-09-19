@@ -12,8 +12,6 @@ __pycache__/
 node_modules/
 dist/
 Asset/
-# Copyrighted textbook content and Railway CLI link state never enter git.
-# Local files stay on disk for railway up / Docker builds; they are just not
-# published to the public repository.
-builtin_books/
-.railway/
+# Railway CLI packs its upload context following .gitignore, so paths that
+# must stay out of git but inside the Docker build context (builtin_books,
+# .railway) live in .git/info/exclude instead — see README deploy notes.
