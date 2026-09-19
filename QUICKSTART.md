@@ -6,7 +6,7 @@ The new application uses Python 3.11+ and a build-free web UI. Install `requirem
 
 For Railway, connect this repository to a new service, use the included Dockerfile, attach a Volume at `/data`, and configure `STUDY_SECRET_KEY`, `STUDY_DATA_DIR=/data`, `STUDY_COOKIE_SECURE=1`, and `STUDY_LLM_BASE_URL/API_KEY/MODEL`. Keep one replica/worker. Optional embedding settings enable semantic retrieval; otherwise retrieval is explicitly keyword-only. Set an invitation code before sharing a classroom deployment.
 
-[完整中文部署说明、隐私边界与人工验收](README.md) · [Environment template](.env.example)
+[完整中文部署说明、隐私边界与人工验收](README.zh-CN.md) · [Environment template](.env.example)
 
 The following instructions apply only to the preserved OpenClaw hook. They are **not required** to start the course tutor.
 

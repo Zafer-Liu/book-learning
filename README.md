@@ -1,34 +1,36 @@
 # 书内 · Book Learning
 
+**English** · [中文](README.zh-CN.md)
+
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3398?style=flat-square&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.x-3398?style=flat-square)
 ![License](https://img.shields.io/badge/License-GPL--3.0-yellow?style=flat-square)
 ![Tests](https://img.shields.io/badge/Tests-114%20passing-success?style=flat-square)
 
-**把教材放进书架,让每一次回答都带你回到原文。**
+**Put your textbooks on the shelf — and let every answer lead you back to the original text.**
 
-「书内」是一个可自部署的多账户教材学习工作台:上传 Markdown / TXT / DOCX 教材,在问答、讲解、梳理、自测四种模式间切换,每个结论都附带可展开核对的原文引用;内置批注阅读器、长对话自动压缩与可选的联网补充检索。数据归属账户与教材,单书限定检索,书与书互不串答。
+Book Learning (「书内」, a.k.a. BOOKNOTE) is a self-hostable, multi-account textbook study workspace: upload Markdown / TXT / DOCX textbooks, switch between Q&A, chapter explanation, key-point outlining and self-testing, and get answers whose every claim carries an expandable citation back to the source text. It ships with an annotation reader, automatic long-conversation compaction, and an opt-in web-search supplement. All data is scoped by account and by book — one book per retrieval context, no cross-book leakage.
 
 ---
 
-## 图说
+## Diagrams
 
-### 图 1 · 系统架构
+### Diagram 1 · System architecture
 
-整体是单实例 Flask 服务(Gunicorn 单 worker),SQLite 承载全部状态,外部依赖只有模型/向量/搜索三类服务,全部可选、全部可降级:
+A single-instance Flask service (one Gunicorn worker); SQLite holds all state. The only external dependencies are model / embedding / search services — each optional, each degradable:
 
 ```mermaid
 flowchart LR
-    B["浏览器<br/>原生 JS · 无构建"] -->|"HTTPS + SSE"| G["Gunicorn · Flask<br/>单 worker · gthread"]
-    subgraph DATA["持久层 · Volume /data"]
-        DB[("SQLite · WAL<br/>账户/教材/会话/批注")]
-        FTS["FTS5 全文索引<br/>jieba 分词"]
-        SRC["教材原文件<br/>md / txt / docx"]
+    B["Browser<br/>vanilla JS · no build"] -->|"HTTPS + SSE"| G["Gunicorn · Flask<br/>1 worker · gthread"]
+    subgraph DATA["Persistence · Volume /data"]
+        DB[("SQLite · WAL<br/>accounts/books/chats/notes")]
+        FTS["FTS5 full-text index<br/>jieba tokenizer"]
+        SRC["Source files<br/>md / txt / docx"]
     end
-    subgraph BG["后台线程"]
-        IX["索引队列<br/>ThreadPoolExecutor"]
-        SEED["内置教材播种"]
-        STATS["反馈统计折叠"]
+    subgraph BG["Background threads"]
+        IX["Index queue<br/>ThreadPoolExecutor"]
+        SEED["Builtin book seeding"]
+        STATS["Feedback stats folding"]
     end
     G --> DB
     G --> FTS
@@ -36,159 +38,159 @@ flowchart LR
     G --> IX
     G --> SEED
     G --> STATS
-    G -->|"chat/completions 主备"| LLM["问答模型<br/>OpenAI 兼容"]
-    G -->|"/embeddings 可选"| EMB["向量服务<br/>bge-m3"]
-    G -->|"MCP streamable HTTP 可选"| MCP["联网搜索<br/>webSearchPrime"]
+    G -->|"chat/completions primary+fallback"| LLM["Answer model<br/>OpenAI-compatible"]
+    G -->|"/embeddings optional"| EMB["Embedding service<br/>bge-m3"]
+    G -->|"MCP streamable HTTP optional"| MCP["Web search<br/>webSearchPrime"]
 ```
 
-**说明**:浏览器只与本服务通信(严格 CSP,无第三方请求)。检索三通道——词法、FTS5、向量——等权 RRF(k=60)融合;未配置向量服务时明确降级为关键词检索并在界面标注。联网搜索是独立开关,不开启时系统完全书内运行。
+**Notes**: The browser talks only to this service (strict CSP, no third-party requests). Retrieval runs three channels — lexical, FTS5, vector — fused with equal-weight RRF (k=60); without an embedding service it explicitly degrades to keyword retrieval and says so in the UI. Web search is a separate toggle; when off, the system stays strictly book-scoped.
 
-### 图 2 · 一次问答的数据流
+### Diagram 2 · Data flow of one question
 
-教材问答(qa 模式)由模型自主驱动检索,经典单轮检索作为兜底:
+Q&A mode lets the model drive retrieval itself; classic single-shot retrieval is the fallback:
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant S as 服务端
-    participant M as 模型
-    participant W as 搜索 MCP(可选)
-    U->>S: 提问(POST /messages, SSE)
-    S-->>U: status · 正在检索本书
-    loop 自主检索 ≤ 10 次
-        M->>S: search_book(关键词)
-        S-->>M: 教材分块 + C 引用标签
-        S-->>U: search · 命中 N 段
+    participant U as User
+    participant S as Server
+    participant M as Model
+    participant W as Search MCP (optional)
+    U->>S: Ask (POST /messages, SSE)
+    S-->>U: status · searching this book
+    loop autonomous search ≤ 10 calls
+        M->>S: search_book(keywords)
+        S-->>M: book chunks + C citation labels
+        S-->>U: search · N passages hit
     end
-    opt 用户勾选「联网补充」
-        M->>W: web_search(检索词) ≤ 4 次
-        W-->>M: 网页结果 + W 标签
-        S-->>U: search · 命中 N 条来源
+    opt user enabled "web supplement"
+        M->>W: web_search(terms) ≤ 4 calls
+        W-->>M: page results + W labels
+        S-->>U: search · N sources hit
     end
-    M-->>S: 严格 JSON 回答(内嵌 [C1][W1] 标记)
-    S->>S: 引用白名单校验
-    alt 校验通过
-        S-->>U: delta 流式预览 → answer → context(上下文计量)
-    else 缺失/编造引用
-        S-->>S: 整条拦截,不落库
+    M-->>S: strict-JSON answer (inline [C1][W1] markers)
+    S->>S: citation whitelist validation
+    alt validation passes
+        S-->>U: delta live preview → answer → context (meter update)
+    else missing / fabricated citations
+        S-->>S: whole answer rejected, not persisted
     end
 ```
 
-**说明**:引用标签由服务端在检索时分配,模型只能使用返回过的编号——缺失引用、编造编号、纯网络内容替代教材依据的回答都会被整条拒绝保存。前端实时展示每一次检索步骤,回答下方保留完整检索轨迹。
+**Notes**: Citation labels are assigned by the server at retrieval time; the model may only use labels it was given. Answers with missing citations, fabricated labels, or web content standing in for textbook evidence are rejected wholesale and never saved. The UI streams every search step live and keeps the full trace under the answer.
 
-### 图 3 · 长对话压缩与上下文计量
+### Diagram 3 · Conversation compaction & the context meter
 
-输入框右侧的计量条实时显示未压缩上下文与压缩阈值的比例,压缩由服务端自动完成:
+The meter right of the composer shows un-compacted context against the compaction threshold; compaction itself runs server-side, automatically:
 
 ```mermaid
 flowchart TB
-    A["对话持续生长"] --> B{"未压缩字数 ≥ 9,000<br/>且消息数 ≥ 6 ?"}
-    B -->|否| C["计量条: 上下文 2.1k/9k<br/>≥80% 变琥珀 · 到阈值变红"]
-    B -->|是| D["一次摘要调用<br/>压缩较早问答<br/>最近 3 组原样保留"]
-    D --> E["摘要 + 水位线落库"]
-    E --> F["计量条回落至尾部体量<br/>提示已压缩 N 字"]
+    A["Conversation keeps growing"] --> B{"Un-compacted chars ≥ 9,000<br/>and ≥ 6 messages?"}
+    B -->|No| C["Meter: context 2.1k/9k<br/>amber ≥80% · red at threshold"]
+    B -->|Yes| D["One summarizer call<br/>compacts older Q&A<br/>last 3 pairs stay verbatim"]
+    D --> E["Summary + watermark persisted"]
+    E --> F["Meter falls back to the tail<br/>toast: N chars compacted"]
     C --> A
     F --> A
-    D -.->|"失败: 断路器"| G["对话保持原样<br/>连续 3 次失败后熔断"]
+    D -.->|"failure: circuit breaker"| G["Conversation kept as-is<br/>opens after 3 consecutive failures"]
 ```
 
-**说明**:摘要作为不可信上下文随下一轮提示下发(系统提示禁止把它当指令),引用标记不进入摘要;每轮回答后 SSE `context` 事件刷新计量条,切回会话时从历史接口恢复读数。
+**Notes**: The summary rides along as untrusted context on later prompts (the system prompt forbids treating it as instructions), and citation markers never enter it. An SSE `context` event refreshes the meter after every answer; reopening a conversation restores the reading from the history endpoint.
 
-### 图 4 · 引用信任链
+### Diagram 4 · The citation trust chain
 
-C 引用(教材)与 W 引用(联网)双轨校验,这是「没有依据就不补写答案」的执行机制:
+C labels (textbook) and W labels (web) are validated on separate tracks — this is how "no evidence, no answer" is actually enforced:
 
 ```mermaid
 flowchart LR
-    M["模型输出<br/>句子[C1] / 补充[W1]"] --> V{"服务端逐条校验"}
-    V -->|"C 编号在本次教材池"| OK1["✓ 蓝色按钮<br/>展开真实分块<br/>可通读上下文"]
-    V -->|"W 编号在本次网络池"| OK2["✓ 琥珀按钮<br/>打开原网页<br/>标注不属于教材"]
-    V -->|"编号从未返回 / 回答无引用<br/>/ 纯 W 试图替代教材"| X["✗ 整条回答拦截<br/>不保存 · 用户收到明确拒答"]
+    M["Model output<br/>sentence[C1] / supplement[W1]"] --> V{"Server validates each label"}
+    V -->|"C label in this turn's book pool"| OK1["✓ blue button<br/>expands the real chunk<br/>readable in context"]
+    V -->|"W label in this turn's web pool"| OK2["✓ amber button<br/>opens the source page<br/>marked as non-textbook"]
+    V -->|"label never returned / no citation<br/>/ pure W replacing the book"| X["✗ whole answer rejected<br/>not saved · user gets an explicit refusal"]
 ```
 
-**说明**:教材引用展开的是原文分块及相邻段落(阅读器内可继续通读、加批注);网络引用仅作补充,回答整体必须至少锚定一个 C 引用。
+**Notes**: A textbook citation expands the cited chunk plus its neighbours (keep reading, add annotations in the reader); a web citation is supplementary only, and every answer must anchor on at least one C citation overall.
 
 ---
 
-## 功能特性
+## Features
 
-- **多账户工作台**:注册 / 登录 / 测试码一码一户 / 自带 API Key(BYO);密码 PBKDF2,会话 Cookie + CSRF。教材、会话、批注、原文件全部按账户 + 教材双重隔离。
-- **教材上传与索引**:UTF-8 `.md` / `.markdown` / `.txt` / `.docx`,自动识别章节标题,后台分块索引(默认每段 ≤ 1200 字符、重叠 160);单文件 20 MB / 400 万字符,每账户 20 本 / 50 MB。
-- **四种学习模式**:教材问答(模型自主多轮检索)、章节讲解、要点梳理、自测练习(答案默认折叠);可按章节缩小检索范围。
-- **证据约束生成**:如「图 4」,回答必须落在本轮检索到的证据上,没有依据则明确拒答。
-- **批注阅读器**:全文通读、引用定位上下文、划线高亮三色批注(按账户私有,不发送给模型)。
-- **长对话压缩 + 上下文计量**:如「图 3」。
-- **可选联网补充**:配置搜索 MCP(默认智谱 `webSearchPrime`)后出现开关,默认关闭;如「图 2」,仅模型提炼的检索词出网。
-- **运行日志与反馈统计**:问答 / 索引 / 联网调用逐条留痕(保留 3 天),满意 / 不满意评价沉淀为周期统计。
+- **Multi-account workspace** — registration / login / one-code-one-account test codes / bring-your-own API key; PBKDF2 passwords, session cookies + CSRF. Books, conversations, annotations and source files are scoped by account *and* book.
+- **Upload & indexing** — UTF-8 `.md` / `.markdown` / `.txt` / `.docx`; heading detection; background chunk indexing (≤ 1200 chars per chunk, 160 overlap by default); 20 MB / 4 M chars per file; 20 books / 50 MB per account.
+- **Four study modes** — Q&A (model-driven multi-round retrieval), chapter explanation, key-point outlining, self-testing (answers folded by default); retrieval can be narrowed to a section.
+- **Evidence-constrained generation** — as in Diagram 4: answers must stand on this turn's retrieved evidence; otherwise an explicit refusal.
+- **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model).
+- **Compaction + context meter** — as in Diagram 3.
+- **Opt-in web supplement** — appears only when a search MCP is configured (Zhipu `webSearchPrime` by default), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
+- **Logs & feedback stats** — per-call traces (3-day retention); ratings fold into fixed-period statistics.
 
-## 快速开始(本地)
+## Quick start (local)
 
-需要 Python 3.11+,前端为原生 JS / CSS,无构建步骤:
+Python 3.11+; the frontend is vanilla JS/CSS with no build step:
 
 ```sh
 python -m venv .venv
-# 按所用 shell 激活虚拟环境
+# activate the venv for your shell
 python -m pip install -r requirements.txt
-copy .env.example .env   # 填入模型配置
+copy .env.example .env   # fill in model settings (Windows)
 python -m study
 ```
 
-浏览器打开 `http://127.0.0.1:8080`。回归测试:`python -m unittest discover -s tests -v`(纯离线,不调用真实模型)。
+Open `http://127.0.0.1:8080`. Regression tests: `python -m unittest discover -s tests -v` (fully offline, no live model calls).
 
-## 环境变量
+## Environment variables
 
-| 变量 | 说明 |
+| Variable | Purpose |
 |---|---|
-| `STUDY_SECRET_KEY` | **必填**,≥ 32 字符持久随机密钥;更换后全部会话失效 |
-| `STUDY_DATA_DIR` | 数据目录;Railway 用 Volume 挂载 `/data`,本地默认 `.study-data/` |
-| `STUDY_COOKIE_SECURE` | HTTPS 部署必须 `1`,本地 HTTP 设 `0` |
-| `STUDY_LLM_BASE_URL` / `STUDY_LLM_API_KEY` / `STUDY_LLM_MODEL` | 问答模型,OpenAI 兼容 `/chat/completions` |
-| `STUDY_LLM_MAX_TOKENS` | 输出预算(1000–200000),推理模型需调大 |
-| `STUDY_LLM_JSON_MODE` | 模型支持 `response_format=json_object` 时设 `1` |
-| `STUDY_LLM_FALLBACK_*` | 可选备用模型;仅首个可见增量前切换 |
-| `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | 可选向量服务(OpenAI 兼容 `/embeddings`);更换模型后需重新索引 |
-| `STUDY_SEARCH_MCP_URL` / `STUDY_SEARCH_API_KEY` | 可选联网搜索 MCP(流式 HTTP),默认智谱 `web_search_prime`;不配置则无联网能力 |
-| `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | 注册策略:开放注册 / 一码一户测试码 / 邀请码 |
-| `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | 默认 100 账户 / 每账户 20 本教材 |
+| `STUDY_SECRET_KEY` | **Required**; persistent random secret, 32+ chars; rotating it invalidates all sessions |
+| `STUDY_DATA_DIR` | Data directory; on Railway mount a Volume at `/data`, locally defaults to `.study-data/` |
+| `STUDY_COOKIE_SECURE` | Must be `1` behind HTTPS; `0` only for local HTTP |
+| `STUDY_LLM_BASE_URL` / `STUDY_LLM_API_KEY` / `STUDY_LLM_MODEL` | Answer model, OpenAI-compatible `/chat/completions` |
+| `STUDY_LLM_MAX_TOKENS` | Output budget (1000–200000); raise for reasoning models |
+| `STUDY_LLM_JSON_MODE` | Set `1` only if the model supports `response_format=json_object` |
+| `STUDY_LLM_FALLBACK_*` | Optional fallback model; switching happens only before the first visible delta |
+| `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | Optional embeddings (OpenAI-compatible `/embeddings`); reindex after changing the model |
+| `STUDY_SEARCH_MCP_URL` / `STUDY_SEARCH_API_KEY` | Optional web-search MCP (streamable HTTP); defaults to Zhipu `web_search_prime`; unset = no web capability |
+| `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | Registration policy: open signup / one-code-one-account / invite code |
+| `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | Defaults: 100 accounts / 20 books per account |
 
-密钥只写环境变量(Railway Variables / 本地 `.env`),永不入库;`.env`、教材原文件、本地数据目录均被 Git 与 Docker 上下文排除。
+Secrets live only in environment variables (Railway Variables / local `.env`), never in git; `.env`, source books and local data directories are excluded from both Git and the Docker context.
 
-## Railway 部署
+## Deploying to Railway
 
-1. 仓库连接到独立 Railway 服务,使用仓库内 `Dockerfile`(健康检查 `/health`)。
-2. 挂载持久 Volume 到 `/data`,设置 `STUDY_DATA_DIR=/data`、`STUDY_COOKIE_SECURE=1`。
-3. 保持 **1 副本、1 Gunicorn worker**(SQLite + 单实例索引队列架构;水平扩展前需先外置数据库与任务队列)。
-4. `railway up` 亦可从本地直传构建;`builtin_books/` 内置教材仅在本地磁盘存在,不进 Git,会随构建打包进镜像。
+1. Connect the repository to a dedicated Railway service using the in-repo `Dockerfile` (health check `/health`).
+2. Attach a persistent Volume at `/data`; set `STUDY_DATA_DIR=/data` and `STUDY_COOKIE_SECURE=1`.
+3. Keep **1 replica, 1 Gunicorn worker** (SQLite + a single-instance index queue; externalize the database and job queue before scaling out).
+4. `railway up` also works from a local checkout; `builtin_books/` live only on the local disk — never in git — and are baked into the image at build time.
 
-## 隐私与边界
+## Privacy & boundaries
 
-- 教材与服务端数据按账户隔离,但**不是端到端加密**;部署管理员可访问 Volume。
-- 配置向量服务时,教材分块在索引时发送到该服务;提问时,命中的原文片段与近期问题发送到问答服务;勾选联网时,仅检索词(非完整对话)发送到搜索 MCP。
-- 网络引用内容未经核实,不代表教材观点;法律类教材可能过时,回答不构成现行法律或个人法律意见。
-- 无邮件验证、密码找回、管理员面板、计费与流式中断回滚;停止等待只取消浏览器请求,后台可能仍完成。
+- Data is isolated per account but **not end-to-end encrypted**; the deployment admin can access the Volume.
+- With embeddings configured, indexed chunks go to that service at index time; at question time, hit passages and recent questions go to the answer model; with the web toggle on, only distilled search terms (never the full conversation) go to the search MCP.
+- Web content is unverified and does not represent the textbook; legal textbooks may be outdated — answers are not current-law statements or personal legal advice.
+- No email verification, password recovery, admin panel, billing, or stream-rollback on cancel; cancelling only drops the browser request, the backend may still finish.
 
-## 项目结构
+## Project layout
 
 ```text
-study/            # Flask 后端
-  app.py          #   路由、SSE 问答流、账户与配额
-  tutor.py        #   证据约束生成、agent 检索循环、C/W 引用校验
-  rag.py          #   词法 / FTS5 / 向量三通道 RRF 检索
-  reader.py       #   全文阅读器与批注 API
-  websearch.py    #   搜索 MCP 客户端(流式 HTTP)
-  compaction.py   #   长对话滚动压缩与上下文计量
-  documents.py    #   md / txt / docx 解析与分块
-  database.py     #   SQLite schema 与迁移
-web/              # 原生 JS / CSS 前端(无构建)
-tests/            # 114 项离线回归测试
-docs/             # 分专题文档(架构 / 配置 / 开发 / 维护)
-builtin_books/    # 内置教材(本地保留,不入 Git)
+study/            # Flask backend
+  app.py          #   routes, SSE answer stream, accounts & quotas
+  tutor.py        #   evidence-constrained generation, agent loop, C/W validation
+  rag.py          #   lexical / FTS5 / vector retrieval fused with RRF
+  reader.py       #   full-text reader and annotation API
+  websearch.py    #   search-MCP client (streamable HTTP)
+  compaction.py   #   rolling conversation compaction + context meter
+  documents.py    #   md / txt / docx parsing and chunking
+  database.py     #   SQLite schema and migrations
+web/              # vanilla JS / CSS frontend (no build)
+tests/            # 114 offline regression tests
+docs/             # topical docs (architecture / configuration / development / maintenance)
+builtin_books/    # builtin textbooks (local only, never in git)
 ```
 
-## 历史:OpenClaw 自我改进 Hook
+## History: the OpenClaw self-improvement hook
 
-仓库早期为一个面向 AI Agent 的自我改进系统(启动检测错误、定时提升经验、沉淀行为记忆),见 [QUICKSTART.md](QUICKSTART.md) 与 `self-improvement/`;它与课程助手分别运行,历史计划不代表现有能力。
+This repository began as a self-improvement system for AI agents (bootstrap error detection, scheduled learning promotion, durable behavioural memory) — see [QUICKSTART.md](QUICKSTART.md) and `self-improvement/`. It runs separately from the study workspace; its historical plans do not describe current capabilities.
 
-## 许可证
+## License
 
 [GPL-3.0](LICENSE)
