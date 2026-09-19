@@ -120,6 +120,7 @@ SYSTEM_PROMPT = """你是课程学习助手。唯一事实依据是本次提供�
 解释可以通俗改写，但不增加没有依据的定义、法条、案例或结论。涉及法律的教材可能过时，不得宣称内容为现行法律或个人法律意见。
 每段事实、每道题都必须附上本次证据中的引用标签；不编造页码、章节、来源或引用。章节概览仅概括提供的片段，不宣称覆盖全章或全书。
 输出严格 JSON，不要 Markdown 代码围栏。字符串值内部不要出现未转义的英文双引号，引用词语一律用中文引号「」。
+划重点：text 中可用 **加粗** 标出关键术语、结论与数字；这是唯一允许的 Markdown 记号，不得使用标题、列表、代码块、链接或星号以外的符号。
 普通模式格式为（引用标记内嵌在 text 中，紧跟它所支持的句子或分句之后）：
 {"paragraphs":[{"text":"回答段落。被证据支持的句子后跟标记[C1]，另一句的依据是[C2]。","citations":["C1","C2"]}],"quiz":[]}
 自测模式格式为（quiz 文本中不内嵌标记，只用 citations 数组）：
@@ -134,6 +135,8 @@ AGENT_SYSTEM_PROMPT = """你是课程学习助手。唯一事实依据是 search
 确实检索不到足以回答的依据时输出 {"insufficient":true}，不能为了回答而把无关引文拼接成结论。
 解释可以通俗改写，但不增加没有依据的定义、法条、案例或结论。涉及法律的教材可能过时，不得宣称内容为现行法律或个人法律意见。
 引用标记只能使用工具结果中的 C 编号（如 [C1]），内嵌在 text 中紧跟被支持的句子或分句之后；同一句有多个证据时写成 [C1][C2]；不编造编号、页码、章节、来源或引用。
+当问题涉及流程、步骤、结构或层级关系、文字难以讲清时，可调用 draw_diagram 生成流程图或思维导图辅助理解，累计不超过 3 张；图的内容也必须来自已检索到的证据。
+划重点：text 中可用 **加粗** 标出关键术语、结论与数字；这是唯一允许的 Markdown 记号，不得使用标题、列表、代码块、链接或星号以外的符号。
 最终回答输出严格 JSON，不要 Markdown 代码围栏。字符串值内部不要出现未转义的英文双引号，引用词语一律用中文引号「」：
 {"paragraphs":[{"text":"回答段落。被证据支持的句子后跟标记[C1]，另一句的依据是[C2]。","citations":["C1","C2"]}],"quiz":[]}
 citations 数组按出现顺序列出该段全部标记。
@@ -146,6 +149,8 @@ AGENT_WEB_SYSTEM_PROMPT = """你是课程学习助手。教材证据的唯一来
 确实检索不到足以回答的教材依据时输出 {"insufficient":true}；不能用联网结果替代教材依据作答。
 解释可以通俗改写，但不增加没有依据的定义、法条、案例或结论。涉及法律的教材可能过时，不得宣称内容为现行法律或个人法律意见。
 教材证据的引用标记只能使用工具结果中的 C 编号（如 [C1]），联网结果的引用标记只能使用 W 编号（如 [W1]），都内嵌在 text 中紧跟被支持的句子或分句之后；同一句有多个证据时写成 [C1][W1]；不编造编号、页码、章节、来源或引用。
+当问题涉及流程、步骤、结构或层级关系、文字难以讲清时，可调用 draw_diagram 生成流程图或思维导图辅助理解，累计不超过 3 张；图的内容必须来自已检索到的证据。
+划重点：text 中可用 **加粗** 标出关键术语、结论与数字；这是唯一允许的 Markdown 记号，不得使用标题、列表、代码块、链接或星号以外的符号。
 最终回答输出严格 JSON，不要 Markdown 代码围栏。字符串值内部不要出现未转义的英文双引号，引用词语一律用中文引号「」：
 {"paragraphs":[{"text":"回答段落。教材依据的句子后跟[C1]，联网补充的句子后跟[W1]。","citations":["C1","W1"]}],"quiz":[]}
 citations 数组按出现顺序列出该段全部标记；回答整体必须至少引用一个 C 编号。
@@ -198,6 +203,39 @@ WEB_SEARCH_TOOL = {
                           "description": "Search keywords in Chinese or English, 1-300 characters."}
             },
             "required": ["query"]
+        }
+    }
+}
+
+# Diagrams cost render time and tokens, so the per-answer budget is small.
+AGENT_MAX_DIAGRAMS = 3
+DIAGRAM_KINDS = ("flowchart", "mindmap")
+
+# Built-in visual-explanation tool: the model decides on its own when a
+# process or hierarchy is easier to show than to tell. The returned code is
+# rendered client-side by mermaid (securityLevel strict) and stored with the
+# answer; content must still come from the retrieved textbook evidence.
+DIAGRAM_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "draw_diagram",
+        "description": "Attach a flowchart or mindmap to your answer to aid understanding. "
+                       "Use flowchart for processes/steps/decisions, mindmap for taxonomies/"
+                       "hierarchies. Call only when the structure is hard to convey in prose; "
+                       "content must come from the retrieved evidence. Max 3 per answer.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": list(DIAGRAM_KINDS),
+                         "description": "Diagram type: flowchart or mindmap."},
+                "title": {"type": "string",
+                          "description": "Short Chinese caption, 1-80 characters."},
+                "code": {"type": "string",
+                         "description": "Mermaid syntax without code fences. flowchart TD/"
+                                        "LR with A[标签] --> B[标签]; mindmap with indented "
+                                        "root((根)) and child lines. Keep labels short."}
+            },
+            "required": ["kind", "title", "code"]
         }
     }
 }
@@ -482,7 +520,7 @@ class Tutor:
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         pool, web_pool = {}, {}
-        ctx = {"rounds": 0, "calls": 0, "web_calls": 0, "auto": False}
+        ctx = {"rounds": 0, "calls": 0, "web_calls": 0, "diagrams": [], "auto": False}
         # Only failures before the first emitted delta may switch providers,
         # exactly like generate_stream(); later rounds already carry state.
         emitted = [False]
@@ -503,7 +541,7 @@ class Tutor:
 
     def _agent_loop(self, provider, messages, pool, web_pool, ctx, question, search, retrieval, emitted, web_search=None):
         shown = 0
-        tools = AGENT_TOOLS + ([WEB_SEARCH_TOOL] if web_search is not None else [])
+        tools = AGENT_TOOLS + [DIAGRAM_TOOL] + ([WEB_SEARCH_TOOL] if web_search is not None else [])
         while ctx["rounds"] < AGENT_MAX_ROUNDS:
             ctx["rounds"] += 1
             # response_format is intentionally omitted: it can conflict with
@@ -595,7 +633,7 @@ class Tutor:
                 shown = 0  # the next answer starts a fresh preview
                 yield ("search", self._auto_search(messages, question, pool, search))
                 continue
-            yield ("result", self._agent_result(content, pool, web_pool, retrieval))
+            yield ("result", self._agent_result(content, pool, web_pool, ctx, retrieval))
             return
         raise TutorError("多轮检索后模型未形成可保存的回答，请重试。")
 
@@ -689,6 +727,8 @@ class Tutor:
         name = call["name"] or "search_book"
         if name == "web_search":
             return self._run_web_call(call, web_pool, web_search, ctx)
+        if name == "draw_diagram":
+            return self._run_diagram_call(call, ctx)
         if name != "search_book":
             return {"error": "unknown tool"}, {"query": name[:60], "count": 0, "error": True}
         raw = call["arguments"] or "{}"
@@ -776,6 +816,48 @@ class Tutor:
     def _web_rows(refs):
         return [{key: ref[key] for key in ("label", "title", "url", "site", "snippet")} for ref in refs]
 
+    @staticmethod
+    def _run_diagram_call(call, ctx):
+        """Validate one draw_diagram call and stage it for the final answer.
+        The code is rendered client-side by mermaid (strict mode); here we only
+        enforce shape, size and an allow-listed kind."""
+        raw = call["arguments"] or "{}"
+        try:
+            args = json.loads(raw)
+            if not isinstance(args, dict):
+                raise ValueError
+        except ValueError:
+            try:
+                args = _decode_object(raw)
+            except ValueError:
+                return {"error": "invalid arguments"}, {"query": "", "count": 0, "error": True, "diagram": True}
+        if len(ctx["diagrams"]) >= AGENT_MAX_DIAGRAMS:
+            return {"error": f"最多生成 {AGENT_MAX_DIAGRAMS} 张图，请直接作答"}, \
+                   {"query": "draw_diagram", "count": 0, "error": True, "diagram": True}
+        kind = args.get("kind") or "flowchart"
+        if kind not in DIAGRAM_KINDS:
+            kind = "flowchart"
+        title = args.get("title")
+        title = title.strip()[:80] if isinstance(title, str) else ""
+        if not title:
+            return {"error": "title must be a non-empty string"}, \
+                   {"query": "", "count": 0, "error": True, "diagram": True}
+        code = args.get("code")
+        if not isinstance(code, str):
+            return {"error": "code must be a mermaid string"}, \
+                   {"query": "", "count": 0, "error": True, "diagram": True}
+        # Models like to wrap mermaid in fences; strip them before storing.
+        code = "\n".join(line for line in code.strip().splitlines()
+                         if not line.strip().startswith("```")).strip()
+        lowered = code.lower()
+        if not 1 <= len(code) <= 6000 or len(code.splitlines()) > 60 \
+                or "<script" in lowered or "javascript:" in lowered:
+            return {"error": "code must be 1-6000 chars, at most 60 lines, plain mermaid"}, \
+                   {"query": "", "count": 0, "error": True, "diagram": True}
+        ctx["diagrams"].append({"kind": kind, "title": title, "code": code})
+        return ({"ok": True, "note": "diagram attached to the answer; continue and answer in strict JSON"},
+                {"query": title[:60], "count": 1, "diagram": True})
+
     def _auto_search(self, messages, question, pool, search):
         """Attach one automatic search result and ask for an evidence-based answer."""
         try:
@@ -790,7 +872,7 @@ class Tutor:
                          + "\n请依据以上证据按既定 JSON 格式作答；证据不足则输出 {\"insufficient\":true}。"})
         return {"query": question[:60], "count": len(refs), "auto": True}
 
-    def _agent_result(self, content, pool, web_pool, retrieval):
+    def _agent_result(self, content, pool, web_pool, ctx, retrieval):
         try:
             result = parse_model_json(content)
         except (ValueError, KeyError, TypeError, IndexError) as exc:
@@ -815,6 +897,7 @@ class Tutor:
                       "不属于教材内容，请自行甄别核实。")
         return {"content": "\n\n".join(p["text"] for p in paragraphs), "paragraphs": paragraphs, "quiz": [],
                 "citations": citations, "grounded": True, "retrieval": retrieval,
+                "diagrams": ctx.get("diagrams") or [],
                 "notice": notice}
 
 

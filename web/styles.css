@@ -129,6 +129,13 @@ h1, h2, h3, p { margin: 0; }
 .message-head strong { font-weight: 600; color: var(--ink); font-size: 11px; }
 .message.user .message-body { background: var(--paper); border-radius: 8px; padding: 14px 17px; line-height: 1.9; font-size: 13px; white-space: pre-wrap; }
 .answer-paragraph { font-size: 13px; line-height: 2; margin-bottom: 14px; white-space: pre-wrap; }
+.answer-paragraph .key-point, .message-body .key-point { font-weight: 700; color: var(--ink); background: linear-gradient(transparent 62%, #f7e8c8 62%); padding: 0 1px; }
+.diagram { margin: 4px 0 18px; border: 1px dashed var(--line); border-radius: 8px; padding: 12px 14px; background: var(--white); }
+.diagram-title { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 8px; letter-spacing: .05em; }
+.diagram-body { overflow-x: auto; text-align: center; }
+.diagram-body svg { max-width: 100%; height: auto; }
+.diagram-body.failed { text-align: left; color: var(--warning); font-size: 11px; }
+.diagram-source pre { margin-top: 6px; padding: 8px 10px; background: var(--paper); border-radius: 5px; font: 10px/1.7 var(--mono); white-space: pre-wrap; word-break: break-all; }
 .stream-body { font-size: 13px; line-height: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
 .citation { display: inline-block; vertical-align: baseline; color: var(--blue); background: var(--blue-soft); border-radius: 3px; font: 10px var(--mono); padding: 3px 6px; margin: 0 3px; white-space: nowrap; }
 .citation:hover { background: #d6e2ff; }

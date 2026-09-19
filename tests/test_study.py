@@ -756,6 +756,71 @@ class AgentToolTests(unittest.TestCase):
         self.assertIn("error", replies[0])
         self.assertTrue(events[-1][1]["grounded"])
 
+    ANSWER_BOLD = ('{"paragraphs":[{"text":"**级别管辖**指按级别分工[C1]，详见下图。",'
+                   '"citations":["C1"]}],"quiz":[]}')
+    DIAGRAM_ARGS = ('{"kind":"flowchart","title":"管辖流程","code":'
+                    '"```mermaid\\nflowchart TD\\nA[起诉] --> B[立案]\\n```"}')
+
+    def test_agent_draw_diagram_attaches_to_answer(self):
+        requests_out = []
+
+        def search(query, limit=6):
+            return [self.HIT]
+
+        def post(url, **kwargs):
+            requests_out.append(kwargs["json"])
+            if len(requests_out) == 1:
+                return self.stream([
+                    self.sse_tool_chunk(0, "call_1", "search_book", '{"query": "管辖"}', finish="tool_calls"),
+                    b"data: [DONE]"])
+            if len(requests_out) == 2:
+                return self.stream([
+                    self.sse_tool_chunk(0, "call_2", "draw_diagram", self.DIAGRAM_ARGS, finish="tool_calls"),
+                    b"data: [DONE]"])
+            return self.stream([self.sse_chunk(self.ANSWER_BOLD, finish="stop"), b"data: [DONE]"])
+
+        events = []
+        with patch("study.tutor.requests.post", side_effect=post):
+            for event in self.tutor.agent_stream("管辖流程是什么", "qa", "教材", search, [], {}):
+                events.append(event)
+        # The diagram tool ships in the schema alongside search_book.
+        self.assertIn("draw_diagram", [t["function"]["name"] for t in requests_out[0]["tools"]])
+        infos = [value for kind, value in events if kind == "search"]
+        self.assertTrue(infos and infos[1].get("diagram") and not infos[1].get("error"))
+        result = events[-1][1]
+        # Fences are stripped; kind/title survive verbatim.
+        self.assertEqual(result["diagrams"],
+                         [{"kind": "flowchart", "title": "管辖流程",
+                           "code": "flowchart TD\nA[起诉] --> B[立案]"}])
+        # Bold emphasis survives validation for the client to render.
+        self.assertIn("**级别管辖**", result["paragraphs"][0]["text"])
+
+    def test_agent_diagram_validation_rejects_abuse(self):
+        ctx = {"diagrams": []}
+        inject = {"name": "draw_diagram",
+                  "arguments": json.dumps({"kind": "mindmap", "title": "注入",
+                                           "code": "flowchart TD\nA[<script>alert(1)</script>]"})}
+        reply, info = Tutor._run_diagram_call(inject, ctx)
+        self.assertIn("error", reply)
+        self.assertTrue(info.get("error") and info.get("diagram"))
+        # Bad JSON and empty titles are rejected without raising.
+        reply, info = Tutor._run_diagram_call({"name": "draw_diagram", "arguments": "not-json"}, ctx)
+        self.assertIn("error", reply)
+        reply, info = Tutor._run_diagram_call(
+            {"name": "draw_diagram", "arguments": '{"kind":"flowchart","title":"  ","code":"x"}'}, ctx)
+        self.assertIn("error", reply)
+        self.assertEqual(ctx["diagrams"], [])
+
+    def test_agent_diagram_budget_caps_at_three(self):
+        ctx = {"diagrams": []}
+        call = {"name": "draw_diagram",
+                "arguments": '{"kind":"mindmap","title":"图","code":"mindmap\\n根((x))"}'}
+        for _ in range(5):
+            reply, info = Tutor._run_diagram_call(call, ctx)
+        self.assertEqual(len(ctx["diagrams"]), 3)
+        # The 4th and 5th calls are rejected, never staged.
+        self.assertEqual(info.get("error"), True)
+
     def test_validate_answer_accepts_w_labels_only_when_allowed(self):
         result = {"paragraphs": [{"text": "书内依据[C1]，网络补充[W1]。", "citations": ["C1", "W1"]}], "quiz": []}
         paragraphs, _quiz, used = validate_answer(result, {"C1", "W1"}, "qa")

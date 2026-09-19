@@ -486,6 +486,19 @@ function renderEmpty() {
 }
 
 const CITATION_PATTERN = /\[([CW]\d+)\]/g;
+const BOLD_PATTERN = /\*\*([^*\n]+)\*\*/g;
+
+// Append plain text with **emphasis** rendered as <strong>. Everything stays
+// DOM-built (textContent), so model output can never inject HTML.
+function appendInline(target, text) {
+  let last = 0;
+  for (const match of text.matchAll(BOLD_PATTERN)) {
+    if (match.index > last) target.append(document.createTextNode(text.slice(last, match.index)));
+    target.append(element('strong', 'key-point', match[1]));
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) target.append(document.createTextNode(text.slice(last)));
+}
 
 function citationButton(label, references, message) {
   const reference = references.find((item) => item.label === label);
@@ -528,7 +541,7 @@ function renderAnswerParagraph(paragraph, item, references, message, budget) {
   if (!tokens.some((token) => token.label)) {
     // Legacy answers keep citation buttons appended after the text.
     const piece = budget == null ? item.text : item.text.slice(0, Math.max(0, budget));
-    if (piece) paragraph.append(document.createTextNode(piece));
+    if (piece) appendInline(paragraph, piece);
     if (budget == null || budget >= item.text.length) {
       (item.citations || []).forEach((label) => paragraph.append(citationButton(label, references, message)));
       return true;
@@ -540,7 +553,7 @@ function renderAnswerParagraph(paragraph, item, references, message, budget) {
   tokens.forEach((token) => {
     if (token.label === undefined) {
       const remaining = budget == null ? token.text.length : Math.max(0, budget - consumed);
-      if (remaining > 0) paragraph.append(document.createTextNode(token.text.slice(0, remaining)));
+      if (remaining > 0) appendInline(paragraph, token.text.slice(0, remaining));
       if (remaining < token.text.length) complete = false;
       consumed += token.text.length;
     } else {
@@ -594,14 +607,44 @@ function startTyping(message) {
   }, 16);
 }
 
-// One-line description of a search_book / web_search tool call (live step or
-// saved trace).
+// One-line description of a search_book / web_search / draw_diagram tool call
+// (live step or saved trace).
 function searchStepText(step, index) {
   const label = step.query || '无效请求';
+  if (step.diagram) return `${index + 1}. 生成图解「${label}」${step.error ? '· 调用被拒绝' : ''}`;
   const prefix = step.web ? '联网检索' : (step.auto ? '自动检索' : '检索');
   const unit = step.web ? ' 条来源' : ' 段';
   const outcome = step.error ? '调用被拒绝' : `命中 ${step.count}${unit}`;
   return `${index + 1}. ${prefix}「${label}」· ${outcome}`;
+}
+
+// Render one attached diagram (flowchart / mindmap) with mermaid; a syntax
+// failure keeps the raw code reviewable instead of dropping the diagram.
+function renderDiagram(diagram) {
+  const box = element('section', 'diagram');
+  box.append(element('h4', 'diagram-title', diagram.title || '图解'));
+  const holder = element('div', 'diagram-body');
+  holder.textContent = '正在渲染图解…';
+  box.append(holder);
+  const fallback = (reason) => {
+    holder.replaceChildren();
+    holder.className = 'diagram-body failed';
+    holder.textContent = reason || '';
+    const details = element('details', 'diagram-source');
+    details.append(element('summary', '', '图解语法无法渲染，查看原始代码'), element('pre', '', diagram.code));
+    holder.append(details);
+  };
+  if (!window.mermaid) {
+    fallback('本地图解组件未加载。');
+    return box;
+  }
+  // securityLevel strict makes mermaid escape label text; the SVG below is
+  // machine-generated, never raw model HTML.
+  const id = 'mmd-' + Math.random().toString(36).slice(2, 10);
+  window.mermaid.render(id, diagram.code)
+    .then(({ svg }) => { holder.replaceChildren(); holder.className = 'diagram-body'; holder.innerHTML = svg; })
+    .catch(() => fallback(''));
+  return box;
 }
 
 function renderAssistantBody(article, message, reveal) {
@@ -628,6 +671,9 @@ function renderAssistantBody(article, message, reveal) {
     }
     article.append(quiz);
   });
+  // Diagrams the model attached via draw_diagram render once the answer is
+  // final (never during the live stream or the typing replay).
+  if (!typing) (message.diagrams || []).forEach((diagram) => article.append(renderDiagram(diagram)));
   if (!typing) {
     if (message.notice) article.append(element('p', 'answer-notice', message.notice));
     if (message.retrieval?.degraded) article.append(element('p', 'answer-notice', '本次使用关键词检索，语义向量不可用。'));
@@ -650,6 +696,7 @@ function renderAssistantBody(article, message, reveal) {
       if (meta.hits != null) bits.push(`命中 ${meta.hits} 段`);
       if (meta.searches != null) bits.push(`自主检索 ${meta.searches} 次`);
       if (meta.web_searches != null) bits.push(`联网 ${meta.web_searches} 次`);
+      if (meta.diagrams != null) bits.push(`图解 ${meta.diagrams} 张`);
       if (meta.retrieve_ms != null) bits.push(`检索 ${meta.retrieve_ms}ms`);
       if (meta.generate_ms != null) bits.push(`生成 ${(meta.generate_ms / 1000).toFixed(1)}s`);
       article.append(element('p', 'answer-debug', bits.join(' · ')));
@@ -725,7 +772,9 @@ function renderMessages() {
     heading.append(element('strong', '', '书内'), element('span', '', modeNames[state.mode] || '教材问答'));
     live.append(heading);
     const body = element('div', 'stream-body');
-    body.append(document.createTextNode(state.streamText), element('span', 'type-cursor', '▍'));
+    // The live preview strips ** markers; the final render turns them into
+    // <strong> once the full JSON answer arrives.
+    body.append(document.createTextNode(state.streamText.replace(/\*\*/g, '')), element('span', 'type-cursor', '▍'));
     live.append(body);
     container.append(live);
   }
@@ -960,8 +1009,8 @@ document.addEventListener('visibilitychange', () => {
 
 const logEventNames = {
   chat: '问答', chat_error: '问答失败', agent_search: '工具检索', web_search: '联网检索',
-  index_ready: '索引完成', index_error: '索引失败', index_embed_fallback: '索引降级',
-  request_error: '请求错误', login_failed: '登录失败',
+  diagram: '生成图解', index_ready: '索引完成', index_error: '索引失败',
+  index_embed_fallback: '索引降级', request_error: '请求错误', login_failed: '登录失败',
 };
 
 async function loadLogs() {
@@ -1060,6 +1109,11 @@ $('#evidence-dragbar').addEventListener('pointerdown', (event) => {
 });
 
 applyLayout();
+// mermaid ships as a local single-file asset (CSP: script-src 'self');
+// strict mode escapes label text so model output can never become HTML.
+if (window.mermaid) {
+  window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' });
+}
 loadIdentity().catch((error) => {
   $('#auth-error').textContent = error.message || '暂时无法连接服务，请刷新重试。';
 });

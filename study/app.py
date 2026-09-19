@@ -47,15 +47,19 @@ def uid():
 
 
 def search_step_text(step):
-    """One-line description of a search_book / web_search tool call, shared by
-    the SSE status event, the per-call log row and the persisted step list."""
+    """One-line description of a search_book / web_search / draw_diagram tool
+    call, shared by the SSE status event, the per-call log row and the
+    persisted step list."""
     label = step["query"] or "无效请求"
-    if step.get("web"):
-        prefix, unit = "联网检索", "条来源"
+    if step.get("diagram"):
+        prefix = "生成图解"
+        outcome = "调用被拒绝" if step.get("error") else f"生成 {step['count']} 张"
+    elif step.get("web"):
+        prefix = "联网检索"
+        outcome = "调用被拒绝" if step.get("error") else f"命中 {step['count']} 条来源"
     else:
         prefix = "自动检索" if step.get("auto") else "检索"
-        unit = "段"
-    outcome = "调用被拒绝" if step.get("error") else f"命中 {step['count']} {unit}"
+        outcome = "调用被拒绝" if step.get("error") else f"命中 {step['count']} 段"
     return f"{prefix}「{label}」· {outcome}"
 
 
@@ -235,8 +239,9 @@ def create_app(test_config=None):
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-            "connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         )
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -267,7 +272,7 @@ def create_app(test_config=None):
 
     @app.get("/assets/<path:name>")
     def assets(name):
-        if name not in {"app.js", "reader.js", "styles.css"}:
+        if name not in {"app.js", "reader.js", "styles.css", "mermaid.min.js"}:
             abort(404)
         response = send_from_directory(ROOT / "web", name)
         response.headers["Cache-Control"] = "no-cache"
@@ -903,6 +908,8 @@ def create_app(test_config=None):
                                     # a dedicated log row and persisted metadata.
                                     step = {"query": (value.get("query") or "")[:60],
                                             "count": int(value.get("count") or 0)}
+                                    if value.get("diagram"):
+                                        step["diagram"] = True
                                     if value.get("web"):
                                         step["web"] = True
                                     if value.get("auto"):
@@ -910,7 +917,8 @@ def create_app(test_config=None):
                                     if value.get("error"):
                                         step["error"] = True
                                     agent_state["steps"].append(step)
-                                    add_log("web_search" if step.get("web") else "agent_search",
+                                    add_log("diagram" if step.get("diagram") else
+                                            "web_search" if step.get("web") else "agent_search",
                                             level="warning" if step.get("error") else "info",
                                             detail=f"{search_step_text(step)} · 问: {question[:40]}",
                                             owner_id=owner)
@@ -932,17 +940,20 @@ def create_app(test_config=None):
                             hit_count = retrieval.get("evidence", len(answer.get("citations", [])))
                             retrieve_ms = agent_state["ms"]
                             web_steps = sum(1 for step in agent_state["steps"] if step.get("web"))
+                            diagram_steps = sum(1 for step in agent_state["steps"] if step.get("diagram"))
                             retrieval.update({
                                 "backend": agent_state["backend"], "degraded": agent_state["degraded"],
                                 "scope": "agent-searches", "section": section,
                                 "steps": agent_state["steps"],
-                                "searches": len(agent_state["steps"]) - web_steps,
+                                "searches": len(agent_state["steps"]) - web_steps - diagram_steps,
                                 "hits": hit_count, "retrieve_ms": retrieve_ms,
                                 # Shipped with the answer so the evidence panel can highlight query hits.
                                 "terms": sorted(agent_state["word_set"])[:24],
                             })
                             if web_steps:
                                 retrieval["web_searches"] = web_steps
+                            if diagram_steps:
+                                retrieval["diagrams"] = diagram_steps
                             retrieval.pop("evidence", None)
                     if answer is None:
                         retrieve_started = time.monotonic()

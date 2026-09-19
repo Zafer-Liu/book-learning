@@ -118,9 +118,11 @@ flowchart LR
 - **Upload & indexing** — UTF-8 `.md` / `.markdown` / `.txt` / `.docx`; heading detection; background chunk indexing (≤ 1200 chars per chunk, 160 overlap by default); 20 MB / 4 M chars per file; 20 books / 50 MB per account.
 - **Four study modes** — Q&A (model-driven multi-round retrieval), chapter explanation, key-point outlining, self-testing (answers folded by default); retrieval can be narrowed to a section.
 - **Evidence-constrained generation** — as in Diagram 4: answers must stand on this turn's retrieved evidence; otherwise an explicit refusal.
+- **Automatic emphasis** — the model marks key terms, conclusions and numbers with **bold** (the only Markdown token allowed); the client renders it safely with no HTML injection.
 - **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model).
 - **Compaction + context meter** — as in Diagram 3.
 - **Opt-in web supplement** — appears only when `STUDY_SEARCH_API_KEY` is set (defaults to Zhipu's `web-search-pro` tools API — any ordinary Zhipu key works; a remote MCP is also supported), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
+- **Built-in diagram tool** — when a process, structure or hierarchy is hard to convey in prose, the agent calls `draw_diagram` on its own to attach mermaid flowcharts/mindmaps (max 3 per answer, content bound to the retrieved evidence); they render inline and persist with the answer.
 - **Logs & feedback stats** — per-call traces (3-day retention); ratings fold into fixed-period statistics.
 
 ## Quick start (local)
