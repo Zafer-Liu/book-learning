@@ -1,417 +1,194 @@
-# Booknote · Book-scoped RAG Course Tutor
+# 书内 · Book Learning
 
-The primary application is now a Railway-ready, multi-account textbook learning workspace. Upload UTF-8 Markdown/TXT books, switch the active book, and use Q&A, chapter explanations, outlines, or self-tests with inspectable chapter/chunk citations. Scanned PDFs must be OCR'd to Markdown first; images are not indexed.
+![Python](https://img.shields.io/badge/Python-3.11%2B-3398?style=flat-square&logo=python&logoColor=white)
+![Flask](https://img.shields.io/badge/Flask-3.x-3398?style=flat-square)
+![License](https://img.shields.io/badge/License-GPL--3.0-yellow?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-114%20passing-success?style=flat-square)
 
-Retrieval and stored conversations are filtered by both account and book before generation. The backend combines lexical matching, jieba-tokenized SQLite FTS5 and optional OpenAI-compatible embeddings with RRF. Without an embedding service it explicitly reports keyword-only retrieval. Invalid citation identifiers are rejected; this is not a guarantee that every model claim is entailed by its cited passage.
+**把教材放进书架,让每一次回答都带你回到原文。**
 
-See [the complete setup and limitations](README.zh-CN.md) and [.env.example](.env.example). Local startup: install `requirements.txt`, configure the model, then run `python -m study` at `http://127.0.0.1:8080`. The vanilla web UI requires no frontend build. The original TypeScript build remains for the preserved OpenClaw hook only.
-
-On Railway, use `Dockerfile` / `railway.toml`, attach a Volume at `/data`, set `STUDY_DATA_DIR=/data`, a persistent random `STUDY_SECRET_KEY` (32+ characters), `STUDY_COOKIE_SECURE=1`, and `STUDY_LLM_BASE_URL/API_KEY/MODEL`. Set `STUDY_INVITE_CODE` for classroom registration. Keep one replica and one Gunicorn worker; background indexing and SQLite are single-instance. Source books, credentials, and `Asset/` are excluded from Git and the Docker context.
-
-Book excerpts are sent to the configured LLM; configuring embeddings also sends indexed chunks to that service. Reindexing clears the book's conversations to invalidate old references. This version has no email verification, password recovery, learning-plan scheduler, or billing system.
-
-Regression tests are provided for manual execution: `python -m unittest discover -s tests -v`. Implementation was statically reviewed only; no builds, tests, live model calls, or actual Railway deployment were performed.
+「书内」是一个可自部署的多账户教材学习工作台:上传 Markdown / TXT / DOCX 教材,在问答、讲解、梳理、自测四种模式间切换,每个结论都附带可展开核对的原文引用;内置批注阅读器、长对话自动压缩与可选的联网补充检索。数据归属账户与教材,单书限定检索,书与书互不串答。
 
 ---
 
-## Preserved OpenClaw auto-learning hook
+## 图说
 
-The following legacy documentation describes a separate hook, not the course tutor.
+### 图 1 · 系统架构
 
-[![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933.svg?logo=node.js&logoColor=white)](#)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6.svg?logo=typescript&logoColor=white)](#)
-[![OpenClaw](https://img.shields.io/badge/Agent_Runtime-OpenClaw-6E56CF.svg)](#)
-[![Hook](https://img.shields.io/badge/Bootstrap_Hook-v4.1-8A2BE2.svg)](#)
-[![License](https://img.shields.io/badge/License-GPL--3.0-yellow.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/Status-Active-success.svg)](#)
-
-> **中文**：面向 AI Agent 的自动学习系统：启动检测错误、定时提升经验、持续沉淀行为记忆。\
-> **English**: A self-improvement system for AI agents: detect errors at bootstrap, promote learnings on schedule, and accumulate durable behavioral memory.
-> - auto-detect error signals at bootstrap
-> - write structured inbox entries to `ERRORS.md`
-> - promote learnings into `LEARNINGS.md` / `MEMORY.md`
-> - enforce idempotency, dedup, cooldown, archive, and safe writes
-
----
-
-[中文文档 (README.zh-CN.md)](./README.zh-CN.md)
-
----
-
-## Why this exists
-
-Agents often repeat the same mistakes across sessions.\
-This project turns runtime failures and user corrections into durable operational knowledge.
-
-**Goal:** make the system continuously improve from “error → extraction → learning → memory”.
-
----
-
-## Workflow Overview (Self-Improvement Loop)
+整体是单实例 Flask 服务(Gunicorn 单 worker),SQLite 承载全部状态,外部依赖只有模型/向量/搜索三类服务,全部可选、全部可降级:
 
 ```mermaid
 flowchart LR
-    %% 样式
-    classDef source fill:#bbdefb,stroke:#1565c0,stroke-width:2px
-    classDef process fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px
-    classDef storage fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
-    classDef action fill:#ffccbc,stroke:#d84315,stroke-width:2px
-
-    %% 数据源
-    subgraph Sources ["📥 数据源"]
-        LogStream[Agent 运行时<br/>Streaming Log]:::source
-        MemoryFiles[memory/*.md<br/>历史记忆文件]:::source
+    B["浏览器<br/>原生 JS · 无构建"] -->|"HTTPS + SSE"| G["Gunicorn · Flask<br/>单 worker · gthread"]
+    subgraph DATA["持久层 · Volume /data"]
+        DB[("SQLite · WAL<br/>账户/教材/会话/批注")]
+        FTS["FTS5 全文索引<br/>jieba 分词"]
+        SRC["教材原文件<br/>md / txt / docx"]
     end
-
-    %% 核心引擎
-    subgraph Engine ["⚙️ 核心引擎"]
-        Hook[Bootstrap Hook<br/>v1.0<br/>事件驱动]:::process
-        Job[Scheduled Job<br/>每日凌晨<br/>定时驱动]:::process
+    subgraph BG["后台线程"]
+        IX["索引队列<br/>ThreadPoolExecutor"]
+        SEED["内置教材播种"]
+        STATS["反馈统计折叠"]
     end
-
-    %% 存储层
-    subgraph Storage ["🗄️ 三层知识存储"]
-        L1[L1: ERRORS.md<br/>错误收件箱<br/>待处理队列]:::storage
-        L2[L2: LEARNINGS.md<br/>结构化学习<br/>知识库]:::storage
-        L3[L3: MEMORY.md<br/>行为规则<br/>决策记忆]:::storage
-        Archive[Archive/<br/>历史归档<br/>冷数据]:::storage
-    end
-
-    %% 输出
-    subgraph Outputs ["📤 输出与消费"]
-        Agent[AIAgent<br/>读取记忆<br/>调整行为]:::action
-        Report[日报/报告<br/>可观测性]:::action
-    end
-
-    %% 连接
-    LogStream -->|tail -200| Hook
-    MemoryFiles -->|扫描| Hook
-    Hook -->|写入| L1
-    Job -->|读取| L1
-    Job -->|promote| L2
-    Job -->|promote| L3
-    Job -->|archive| Archive
-    L2 -->|读取| Agent
-    L3 -->|读取| Agent
-    Agent -->|产生新日志| LogStream
-    Job -->|生成| Report
-
-    %% 反馈循环
-    Agent -.->|自我改进循环| LogStream
+    G --> DB
+    G --> FTS
+    G --> SRC
+    G --> IX
+    G --> SEED
+    G --> STATS
+    G -->|"chat/completions 主备"| LLM["问答模型<br/>OpenAI 兼容"]
+    G -->|"/embeddings 可选"| EMB["向量服务<br/>bge-m3"]
+    G -->|"MCP streamable HTTP 可选"| MCP["联网搜索<br/>webSearchPrime"]
 ```
 
+**说明**:浏览器只与本服务通信(严格 CSP,无第三方请求)。检索三通道——词法、FTS5、向量——等权 RRF(k=60)融合;未配置向量服务时明确降级为关键词检索并在界面标注。联网搜索是独立开关,不开启时系统完全书内运行。
+
+### 图 2 · 一次问答的数据流
+
+教材问答(qa 模式)由模型自主驱动检索,经典单轮检索作为兜底:
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant S as 服务端
+    participant M as 模型
+    participant W as 搜索 MCP(可选)
+    U->>S: 提问(POST /messages, SSE)
+    S-->>U: status · 正在检索本书
+    loop 自主检索 ≤ 10 次
+        M->>S: search_book(关键词)
+        S-->>M: 教材分块 + C 引用标签
+        S-->>U: search · 命中 N 段
+    end
+    opt 用户勾选「联网补充」
+        M->>W: web_search(检索词) ≤ 4 次
+        W-->>M: 网页结果 + W 标签
+        S-->>U: search · 命中 N 条来源
+    end
+    M-->>S: 严格 JSON 回答(内嵌 [C1][W1] 标记)
+    S->>S: 引用白名单校验
+    alt 校验通过
+        S-->>U: delta 流式预览 → answer → context(上下文计量)
+    else 缺失/编造引用
+        S-->>S: 整条拦截,不落库
+    end
+```
+
+**说明**:引用标签由服务端在检索时分配,模型只能使用返回过的编号——缺失引用、编造编号、纯网络内容替代教材依据的回答都会被整条拒绝保存。前端实时展示每一次检索步骤,回答下方保留完整检索轨迹。
+
+### 图 3 · 长对话压缩与上下文计量
+
+输入框右侧的计量条实时显示未压缩上下文与压缩阈值的比例,压缩由服务端自动完成:
+
+```mermaid
+flowchart TB
+    A["对话持续生长"] --> B{"未压缩字数 ≥ 9,000<br/>且消息数 ≥ 6 ?"}
+    B -->|否| C["计量条: 上下文 2.1k/9k<br/>≥80% 变琥珀 · 到阈值变红"]
+    B -->|是| D["一次摘要调用<br/>压缩较早问答<br/>最近 3 组原样保留"]
+    D --> E["摘要 + 水位线落库"]
+    E --> F["计量条回落至尾部体量<br/>提示已压缩 N 字"]
+    C --> A
+    F --> A
+    D -.->|"失败: 断路器"| G["对话保持原样<br/>连续 3 次失败后熔断"]
+```
+
+**说明**:摘要作为不可信上下文随下一轮提示下发(系统提示禁止把它当指令),引用标记不进入摘要;每轮回答后 SSE `context` 事件刷新计量条,切回会话时从历史接口恢复读数。
+
+### 图 4 · 引用信任链
+
+C 引用(教材)与 W 引用(联网)双轨校验,这是「没有依据就不补写答案」的执行机制:
+
+```mermaid
+flowchart LR
+    M["模型输出<br/>句子[C1] / 补充[W1]"] --> V{"服务端逐条校验"}
+    V -->|"C 编号在本次教材池"| OK1["✓ 蓝色按钮<br/>展开真实分块<br/>可通读上下文"]
+    V -->|"W 编号在本次网络池"| OK2["✓ 琥珀按钮<br/>打开原网页<br/>标注不属于教材"]
+    V -->|"编号从未返回 / 回答无引用<br/>/ 纯 W 试图替代教材"| X["✗ 整条回答拦截<br/>不保存 · 用户收到明确拒答"]
+```
+
+**说明**:教材引用展开的是原文分块及相邻段落(阅读器内可继续通读、加批注);网络引用仅作补充,回答整体必须至少锚定一个 C 引用。
+
 ---
 
-## Key Features
+## 功能特性
 
-- **Bootstrap Hook v1.0 (core)**
-  - scans recent memory files
-  - scans only latest log file’s **last 200 lines**
-  - captures **±20 lines** context around hits
-- **Robust write safety**
-  - lock file (concurrency protection)
-  - atomic write (`tmp -> rename`)
-- **Noise control**
-  - in-run dedup by canonical key
-  - cross-run cooldown dedup (24h)
-- **Priority-based promotion**
-  - `low`: resolve only
-  - `medium`: write `LEARNINGS.md`
-  - `high/critical`: write `LEARNINGS.md` + `MEMORY.md`
-- **Idempotency contract**
-  - dedup by `Source-Err-ID` during promotion
-- **Knowledge-base hygiene**
-  - archive oversized `LEARNINGS.md`
-  - end-of-day `ERRORS.md` reset (after success only)
+- **多账户工作台**:注册 / 登录 / 测试码一码一户 / 自带 API Key(BYO);密码 PBKDF2,会话 Cookie + CSRF。教材、会话、批注、原文件全部按账户 + 教材双重隔离。
+- **教材上传与索引**:UTF-8 `.md` / `.markdown` / `.txt` / `.docx`,自动识别章节标题,后台分块索引(默认每段 ≤ 1200 字符、重叠 160);单文件 20 MB / 400 万字符,每账户 20 本 / 50 MB。
+- **四种学习模式**:教材问答(模型自主多轮检索)、章节讲解、要点梳理、自测练习(答案默认折叠);可按章节缩小检索范围。
+- **证据约束生成**:如「图 4」,回答必须落在本轮检索到的证据上,没有依据则明确拒答。
+- **批注阅读器**:全文通读、引用定位上下文、划线高亮三色批注(按账户私有,不发送给模型)。
+- **长对话压缩 + 上下文计量**:如「图 3」。
+- **可选联网补充**:配置搜索 MCP(默认智谱 `webSearchPrime`)后出现开关,默认关闭;如「图 2」,仅模型提炼的检索词出网。
+- **运行日志与反馈统计**:问答 / 索引 / 联网调用逐条留痕(保留 3 天),满意 / 不满意评价沉淀为周期统计。
 
----
+## 快速开始(本地)
 
-## Architecture
+需要 Python 3.11+,前端为原生 JS / CSS,无构建步骤:
+
+```sh
+python -m venv .venv
+# 按所用 shell 激活虚拟环境
+python -m pip install -r requirements.txt
+copy .env.example .env   # 填入模型配置
+python -m study
+```
+
+浏览器打开 `http://127.0.0.1:8080`。回归测试:`python -m unittest discover -s tests -v`(纯离线,不调用真实模型)。
+
+## 环境变量
+
+| 变量 | 说明 |
+|---|---|
+| `STUDY_SECRET_KEY` | **必填**,≥ 32 字符持久随机密钥;更换后全部会话失效 |
+| `STUDY_DATA_DIR` | 数据目录;Railway 用 Volume 挂载 `/data`,本地默认 `.study-data/` |
+| `STUDY_COOKIE_SECURE` | HTTPS 部署必须 `1`,本地 HTTP 设 `0` |
+| `STUDY_LLM_BASE_URL` / `STUDY_LLM_API_KEY` / `STUDY_LLM_MODEL` | 问答模型,OpenAI 兼容 `/chat/completions` |
+| `STUDY_LLM_MAX_TOKENS` | 输出预算(1000–200000),推理模型需调大 |
+| `STUDY_LLM_JSON_MODE` | 模型支持 `response_format=json_object` 时设 `1` |
+| `STUDY_LLM_FALLBACK_*` | 可选备用模型;仅首个可见增量前切换 |
+| `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | 可选向量服务(OpenAI 兼容 `/embeddings`);更换模型后需重新索引 |
+| `STUDY_SEARCH_MCP_URL` / `STUDY_SEARCH_API_KEY` | 可选联网搜索 MCP(流式 HTTP),默认智谱 `web_search_prime`;不配置则无联网能力 |
+| `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | 注册策略:开放注册 / 一码一户测试码 / 邀请码 |
+| `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | 默认 100 账户 / 每账户 20 本教材 |
+
+密钥只写环境变量(Railway Variables / 本地 `.env`),永不入库;`.env`、教材原文件、本地数据目录均被 Git 与 Docker 上下文排除。
+
+## Railway 部署
+
+1. 仓库连接到独立 Railway 服务,使用仓库内 `Dockerfile`(健康检查 `/health`)。
+2. 挂载持久 Volume 到 `/data`,设置 `STUDY_DATA_DIR=/data`、`STUDY_COOKIE_SECURE=1`。
+3. 保持 **1 副本、1 Gunicorn worker**(SQLite + 单实例索引队列架构;水平扩展前需先外置数据库与任务队列)。
+4. `railway up` 亦可从本地直传构建;`builtin_books/` 内置教材仅在本地磁盘存在,不进 Git,会随构建打包进镜像。
+
+## 隐私与边界
+
+- 教材与服务端数据按账户隔离,但**不是端到端加密**;部署管理员可访问 Volume。
+- 配置向量服务时,教材分块在索引时发送到该服务;提问时,命中的原文片段与近期问题发送到问答服务;勾选联网时,仅检索词(非完整对话)发送到搜索 MCP。
+- 网络引用内容未经核实,不代表教材观点;法律类教材可能过时,回答不构成现行法律或个人法律意见。
+- 无邮件验证、密码找回、管理员面板、计费与流式中断回滚;停止等待只取消浏览器请求,后台可能仍完成。
+
+## 项目结构
 
 ```text
-[Bootstrap Hook v1.0]
-  ├─ scan memory/*.md (recent files)
-  ├─ scan latest streaming log (last 200 lines)
-  ├─ detect patterns + capture context window (±20)
-  ├─ canonical dedup + 24h cooldown
-  ├─ lock + atomic write -> .learnings/ERRORS.md
-  └─ inject SELF_IMPROVEMENT_REMINDER.md (virtual bootstrap file)
-
-[Scheduled Auto-Learning Job]
-  ├─ parse pending ERR blocks
-  ├─ route by priority (low/medium/high/critical)
-  ├─ idempotent write to LEARNINGS / MEMORY
-  ├─ mark resolved + Processed-At + Disposition
-  ├─ archive LEARNINGS if oversized
-  └─ reset ERRORS.md template
+study/            # Flask 后端
+  app.py          #   路由、SSE 问答流、账户与配额
+  tutor.py        #   证据约束生成、agent 检索循环、C/W 引用校验
+  rag.py          #   词法 / FTS5 / 向量三通道 RRF 检索
+  reader.py       #   全文阅读器与批注 API
+  websearch.py    #   搜索 MCP 客户端(流式 HTTP)
+  compaction.py   #   长对话滚动压缩与上下文计量
+  documents.py    #   md / txt / docx 解析与分块
+  database.py     #   SQLite schema 与迁移
+web/              # 原生 JS / CSS 前端(无构建)
+tests/            # 114 项离线回归测试
+docs/             # 分专题文档(架构 / 配置 / 开发 / 维护)
+builtin_books/    # 内置教材(本地保留,不入 Git)
 ```
 
----
+## 历史:OpenClaw 自我改进 Hook
 
-## Repository Layout
+仓库早期为一个面向 AI Agent 的自我改进系统(启动检测错误、定时提升经验、沉淀行为记忆),见 [QUICKSTART.md](QUICKSTART.md) 与 `self-improvement/`;它与课程助手分别运行,历史计划不代表现有能力。
 
-```text
-self-learning-genius-agent/
-├── README.md
-├── README.zh-CN.md
-├── QUICKSTART.md
-├── CONTRIBUTING.md
-├── CHANGELOG.md
-├── LICENSE
-├── package.json
-├── tsconfig.json
-├── .eslintrc.json
-├── .prettierrc.json
-├── .learnings/
-│   ├── ERRORS.md
-│   ├── LEARNINGS.md
-│   └── archive/
-└── self-improvement/
-    ├── handler.ts
-    └── HOOK.md
-```
+## 许可证
 
----
-
-## Bootstrap Hook v1.0 (Essence)
-
-Place your self-improvement at .openclaw\Hook:
-
-This hook is designed for `agent/bootstrap` events and does:
-
-1. Scan latest memory files (`MAX_MEMORY_FILES=3`)
-2. Scan latest `.log` file (tail window `MAX_LOG_LINES=200`)
-3. Detect error patterns (tool errors, parse errors, user corrections, etc.)
-4. Capture context around each hit (`CONTEXT_RADIUS=20`)
-5. Canonicalize summaries for stable dedup
-6. Apply 24h cooldown for repeated identical error keys
-7. Append entries to `ERRORS.md` with lock + atomic write
-8. Inject a reminder markdown into bootstrap context
-
----
-
-## Header Consistency (Important)
-
-Use a single canonical header for `ERRORS.md`:
-
-```md
-# ERRORS
-<!-- Auto-generated error inbox. New pending errors will be appended below. -->
-<!-- Fields recommended: ERR-ID, Priority, Status, Area, Summary, Details, Logged -->
-```
-
-If your hook currently checks `# ERRORS.md...`, patch it to accept both old and new formats, and write only `# ERRORS` going forward.
-
----
-
-## `ERRORS.md` Entry Format
-
-```md
-## [ERR-YYYYMMDD-HHMMSS-XXX] category
-
-**Logged**: YYYY-MM-DDTHH:MM:SS.sssZ
-**Priority**: low|medium|high|critical
-**Status**: pending
-**Area**: config|exec|system|chart-generate|github|llm|backtest
-
-### Summary
-One-line description
-
-### Details
-Error message, context, what failed
-
-### Metadata
-- Source: correction|error|knowledge_gap|detected_at_bootstrap
-- Tags: [relevant-tags]
----
-```
-
----
-
-## Auto-Learning Promotion Rules
-
-### Priority routing
-
-- **low**
-  - do not write LEARNINGS/MEMORY
-  - mark `resolved`
-  - `Disposition: skipped_low`
-- **medium**
-  - write `LEARNINGS.md` (idempotent)
-  - mark `resolved`
-  - `Disposition: learned_medium`
-- **high/critical**
-  - write `LEARNINGS.md` (idempotent)
-  - write concise rule to `MEMORY.md` (idempotent)
-  - mark `resolved`
-  - `Disposition: promoted_high`
-
-### Idempotency contract (mandatory)
-
-Before writing to `LEARNINGS.md` or `MEMORY.md`, check:
-
-```text
-Source-Err-ID: ERR-...
-```
-
-If already exists, skip write.
-
----
-
-## Archive Policy
-
-Archive `LEARNINGS.md` when either condition is met:
-
-- entries > `120`, or
-- file size > `256KB`
-
-Then:
-
-1. move oldest entries to `archive/LEARNINGS-YYYYMM.md`
-2. keep latest `80` entries in `LEARNINGS.md`
-
----
-
-## End-of-Day Reset
-
-After **successful** processing (promotion + status updates + archive), reset `ERRORS.md` to template header.
-
-> Never reset if the job failed midway.
-
----
-
-## Scheduling
-
-### Linux/macOS (cron)
-
-```cron
-30 3 * * * /usr/bin/node /path/to/auto-learning.js >> /path/to/auto-learning.log 2>&1
-```
-
-### Windows Task Scheduler
-
-- Trigger: Daily 03:30
-- Action: `node.exe C:\path\to\auto-learning.js`
-- Start in: project directory
-- Enable retry on failure
-
----
-
-## Example Report
-
-```text
-📚 Auto-Learning Report | 2026-04-23
-
-Pending in ERRORS.md: 12
-- skipped low: 3
-- written to LEARNINGS.md: 7
-- promoted to MEMORY.md: 2
-- idempotency skipped: 1
-
-LEARNINGS: 86 entries (198 KB)
-ERRORS.md reset: done
-```
-
----
-
-## Configuration (typical defaults)
-
-- `MAX_MEMORY_FILES = 3`
-- `MAX_LOG_LINES = 200`
-- `CONTEXT_RADIUS = 20`
-- `MAX_NEW_ENTRIES_PER_RUN = 20`
-- `DEDUP_COOLDOWN_MS = 24h`
-- `LOCK_STALE_MS = 30s`
-- `LOCK_WAIT_MS = 8s`
-
----
-
-## Security & Reliability Notes
-
-- File lock prevents concurrent append corruption
-- Atomic writes prevent partial file truncation
-- Cooldown dedup reduces repeated noise bursts
-- Context windows improve downstream root-cause extraction quality
-
----
-
-## Installation
-
-### Prerequisites
-- Node.js >= 18.0.0
-- OpenClaw >= 1.0.0
-- TypeScript 5.0+
-
-### Quick Setup
-
-```bash
-git clone https://github.com/yourusername/self-learning-genius-agent.git
-cd self-learning-genius-agent
-npm install
-npm run build
-openclaw hooks enable self-improvement
-```
-
-For detailed setup instructions, see [QUICKSTART.md](./QUICKSTART.md).
-
----
-
-## Quick Start
-
-1. **Enable the hook** (one-time setup)
-   ```bash
-   openclaw hooks enable self-improvement
-   ```
-2. **Start your agent**
-   ```bash
-   openclaw session
-   ```
-3. **Check learnings**
-   ```bash
-   cat .learnings/ERRORS.md
-   cat .learnings/LEARNINGS.md
-   ```
-
----
-
-## Environment Variables
-
-```bash
-OPENCLAW_WORKSPACE=/path/to/workspace
-OPENCLAW_LOGS_DIR=/path/to/logs
-```
-
----
-
-## Roadmap
-
-- [ ] SQLite idempotency index
-- [ ] semantic dedup (embedding-based)
-- [ ] dashboard for review/approval
-- [ ] notification integrations (Slack/Feishu/Email)
-- [ ] multi-agent shared memory bus
-
----
-
-## Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit changes (`git commit -am 'Add feature'`)
-4. Push to branch (`git push origin feature/your-feature`)
-5. Open a Pull Request
-
----
-
-## License
-
-GPL-3.0 — See [LICENSE](./LICENSE) for details.
-
----
-
-## Support
-
-- **文档**: [QUICKSTART.md](./QUICKSTART.md) | [README.md](./README.md)
-- **OpenClaw**: https://docs.openclaw.ai/automation/hooks#hooks
+[GPL-3.0](LICENSE)
