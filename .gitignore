@@ -12,6 +12,7 @@ __pycache__/
 node_modules/
 dist/
 Asset/
-# Railway CLI packs its upload context following .gitignore, so paths that
-# must stay out of git but inside the Docker build context (builtin_books,
-# .railway) live in .git/info/exclude instead — see README deploy notes.
+# railway up packs its upload context from git-visible files, so builtin_books
+# (copyrighted, never pushed) must stay UNTRACKED but NOT ignored: they ride
+# the build context as plain untracked files, guarded by a local pre-commit
+# hook — see the deploy notes in README.

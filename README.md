@@ -161,7 +161,12 @@ Secrets live only in environment variables (Railway Variables / local `.env`), n
 2. Attach a persistent Volume at `/data`; set `STUDY_DATA_DIR=/data` and `STUDY_COOKIE_SECURE=1`.
 3. Keep **1 replica, 1 Gunicorn worker** (SQLite + a single-instance index queue; externalize the database and job queue before scaling out).
 4. `railway up` also works from a local checkout; `builtin_books/` live only on the local disk — never in git — and are baked into the image at build time.
-5. `railway up` packs its upload context following `.gitignore`, yet the builtin books must stay out of git **and** inside the Docker build context. The repo resolves this with `.git/info/exclude` (a local-only ignore file). After a fresh clone, run: `printf 'builtin_books/\n.railway/\n' >> .git/info/exclude`
+5. `railway up` packs its upload context following git's visibility rules, so the builtin books must stay out of git **and** inside the build context: they are plain untracked files, protected from accidental commits by a local pre-commit hook. After a fresh clone, restore the guard:
+
+   ```sh
+   printf '#!/bin/sh\nif git diff --cached --name-only | grep -q builtin_books/; then\n  echo "ERROR: builtin_books/ must never be committed." >&2\n  exit 1\nfi\n' > .git/hooks/pre-commit
+   chmod +x .git/hooks/pre-commit
+   ```
 
 ## Privacy & boundaries
 

@@ -161,7 +161,12 @@ python -m study
 2. 挂载持久 Volume 到 `/data`,设置 `STUDY_DATA_DIR=/data`、`STUDY_COOKIE_SECURE=1`。
 3. 保持 **1 副本、1 Gunicorn worker**(SQLite + 单实例索引队列架构;水平扩展前需先外置数据库与任务队列)。
 4. `railway up` 亦可从本地直传构建;`builtin_books/` 内置教材仅在本地磁盘存在,不进 Git,会随构建打包进镜像。
-5. `railway up` 打包上传上下文时遵循 `.gitignore`,而内置教材需要「不进 Git、但进 Docker 构建上下文」。仓库用 `.git/info/exclude`(仅本地的忽略文件)解决这一冲突;重新克隆后执行:`printf 'builtin_books/\n.railway/\n' >> .git/info/exclude`
+5. `railway up` 打包上传上下文时遵循 git 的可见性规则,内置教材因此需要保持「不进 Git、但进构建上下文」:它们是普通的未跟踪文件,并靠本地 pre-commit 钩子防止误提交。重新克隆后恢复防线:
+
+   ```sh
+   printf '#!/bin/sh\nif git diff --cached --name-only | grep -q builtin_books/; then\n  echo "ERROR: builtin_books/ must never be committed." >&2\n  exit 1\nfi\n' > .git/hooks/pre-commit
+   chmod +x .git/hooks/pre-commit
+   ```
 
 ## 隐私与边界
 
