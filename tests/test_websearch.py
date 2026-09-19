@@ -11,6 +11,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from study.websearch import TOOL_NAME, WebSearchClient, WebSearchError
 
 # Chinese sample data kept as escapes so the file is pure ASCII on disk.
@@ -81,6 +83,19 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(WebSearchError):
             client.search(ANY_QUERY)
 
+    def test_tools_mode_needs_only_a_key(self):
+        # No MCP URL: the channel runs on the Zhipu tools API with a plain
+        # API key — the same key the LLM providers use.
+        with patch.dict(os.environ, {"STUDY_SEARCH_API_KEY": "k", "STUDY_SEARCH_MCP_URL": ""}):
+            client = WebSearchClient()
+        self.assertTrue(client.configured)
+        self.assertFalse(client.mcp_mode)
+        self.assertEqual(client.base, "https://open.bigmodel.cn/api/paas/v4")
+        # A custom tools base overrides the default; HTTPS rules still apply.
+        with patch.dict(os.environ, {"STUDY_SEARCH_API_KEY": "k", "STUDY_SEARCH_MCP_URL": "",
+                                     "STUDY_SEARCH_BASE_URL": "http://127.0.0.1:9000/v4"}):
+            self.assertTrue(WebSearchClient().configured)
+
     def test_remote_http_and_malformed_urls_are_rejected(self):
         cases = ["http://remote.example/mcp", "https://a.example/mcp?x=1",
                  "https://a.example/mcp#frag", "ftp://a.example/mcp", "not a url"]
@@ -95,7 +110,8 @@ class ConfigTests(unittest.TestCase):
 
 class TransportTests(unittest.TestCase):
     def make_client(self, handler, env=None):
-        environ = {"STUDY_SEARCH_API_KEY": "sk-test", "STUDY_SEARCH_MCP_URL": ""}
+        environ = {"STUDY_SEARCH_API_KEY": "sk-test",
+                   "STUDY_SEARCH_MCP_URL": "https://mcp.test/prime/mcp"}
         environ.update(env or {})
         with patch.dict(os.environ, environ):
             client = WebSearchClient()
@@ -287,6 +303,87 @@ class TransportTests(unittest.TestCase):
         # Rows without any usable content are dropped.
         noisy = json.dumps({"results": [{"title": "  ", "snippet": None}, RESULTS[0]]})
         self.assertEqual(len(shape(noisy).search(ANY_QUERY)), 1)
+
+
+class ToolsApiTests(unittest.TestCase):
+    """Default transport: Zhipu paas/v4/tools with the web-search-pro model."""
+
+    RESULT_ROW = {"title": TITLE, "link": "https://example.com/law", "media": SITE,
+                  "content": SNIPPET, "icon": "https://example.com/icon.png"}
+
+    @property
+    def RESULT(self):
+        # Live shape: results nest inside choices[].message.tool_calls[] as a
+        # search_result call right after the search_intent call.
+        return {"id": "rs-1", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "tool", "tool_calls": [
+                    {"id": "si", "type": "search_intent",
+                     "search_intent": [{"index": 0, "intent": "SEARCH_ALL", "query": QUERY}]},
+                    {"id": "sr", "search_result": [self.RESULT_ROW]}]}}],
+                "usage": {"total_tokens": 1}}
+
+    def make_client(self, handler, env=None):
+        environ = {"STUDY_SEARCH_API_KEY": "sk-test", "STUDY_SEARCH_MCP_URL": ""}
+        environ.update(env or {})
+        with patch.dict(os.environ, environ):
+            client = WebSearchClient()
+        client.session = FakeTransport(handler)
+        return client
+
+    def test_tools_search_normalises_results(self):
+        calls = []
+
+        def handler(payload):
+            calls.append(payload)
+            return FakeResponse(body=json.dumps(self.RESULT, ensure_ascii=False))
+
+        client = self.make_client(handler)
+        rows = client.search(QUERY, 3)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0], {"title": TITLE, "url": "https://example.com/law",
+                                   "site": SITE, "snippet": SNIPPET,
+                                   "icon": "https://example.com/icon.png"})
+        # The request targets the tools endpoint with the search model and key.
+        seen = client.session.seen[0]
+        self.assertEqual(seen["url"], "https://open.bigmodel.cn/api/paas/v4/tools")
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer sk-test")
+        self.assertEqual(calls[0]["model"], "web-search-pro")
+        self.assertEqual(calls[0]["messages"], [{"role": "user", "content": QUERY}])
+        self.assertFalse(calls[0]["stream"])
+
+    def test_tools_search_empty_and_invalid_shapes(self):
+        # No nested search_result call anywhere: empty, not an error.
+        empty = dict(self.RESULT, choices=[])
+        client = self.make_client(lambda p: FakeResponse(body=json.dumps(empty)))
+        self.assertEqual(client.search(QUERY), [])
+        # Top-level search_result is also accepted (legacy/simple shape).
+        flat = {"search_result": [self.RESULT_ROW]}
+        client = self.make_client(lambda p: FakeResponse(body=json.dumps(flat)))
+        self.assertEqual(len(client.search(QUERY)), 1)
+        # Rows without usable content drop out; leftovers are trimmed to count.
+        noisy = {"search_result": [{"title": " ", "content": None}, self.RESULT_ROW]}
+        client = self.make_client(lambda p: FakeResponse(body=json.dumps(noisy)))
+        self.assertEqual(len(client.search(QUERY)), 1)
+        # A non-dict body is rejected loudly instead of fabricating results.
+        client = self.make_client(lambda p: FakeResponse(body=json.dumps([1, 2])))
+        with self.assertRaises(WebSearchError):
+            client.search(QUERY)
+
+    def test_tools_search_transport_errors_raise(self):
+        def handler(payload):
+            raise requests.ConnectionError("down")
+
+        client = self.make_client(handler)
+        with self.assertRaises(WebSearchError):
+            client.search(QUERY)
+
+    def test_error_text_from_server_surfaces(self):
+        denied = {"error": {"code": "1211", "message": "tokens quota exhausted"}}
+        client = self.make_client(lambda p: FakeResponse(status_code=429, body=json.dumps(denied)))
+        # raise_for_status turns 429 into requests.HTTPError; the wrapper maps
+        # every transport failure to a WebSearchError the tutor can relay.
+        with self.assertRaises(WebSearchError):
+            client.search(QUERY)
 
 
 if __name__ == "__main__":

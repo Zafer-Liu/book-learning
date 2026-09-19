@@ -40,7 +40,7 @@ flowchart LR
     G --> STATS
     G -->|"chat/completions primary+fallback"| LLM["Answer model<br/>OpenAI-compatible"]
     G -->|"/embeddings optional"| EMB["Embedding service<br/>bge-m3"]
-    G -->|"MCP streamable HTTP optional"| MCP["Web search<br/>webSearchPrime"]
+    G -->|"tools API / MCP optional"| MCP["Web search<br/>web-search-pro"]
 ```
 
 **Notes**: The browser talks only to this service (strict CSP, no third-party requests). Retrieval runs three channels — lexical, FTS5, vector — fused with equal-weight RRF (k=60); without an embedding service it explicitly degrades to keyword retrieval and says so in the UI. Web search is a separate toggle; when off, the system stays strictly book-scoped.
@@ -120,7 +120,7 @@ flowchart LR
 - **Evidence-constrained generation** — as in Diagram 4: answers must stand on this turn's retrieved evidence; otherwise an explicit refusal.
 - **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model).
 - **Compaction + context meter** — as in Diagram 3.
-- **Opt-in web supplement** — appears only when a search MCP is configured (Zhipu `webSearchPrime` by default), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
+- **Opt-in web supplement** — appears only when `STUDY_SEARCH_API_KEY` is set (defaults to Zhipu's `web-search-pro` tools API — any ordinary Zhipu key works; a remote MCP is also supported), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
 - **Logs & feedback stats** — per-call traces (3-day retention); ratings fold into fixed-period statistics.
 
 ## Quick start (local)
@@ -149,7 +149,7 @@ Open `http://127.0.0.1:8080`. Regression tests: `python -m unittest discover -s 
 | `STUDY_LLM_JSON_MODE` | Set `1` only if the model supports `response_format=json_object` |
 | `STUDY_LLM_FALLBACK_*` | Optional fallback model; switching happens only before the first visible delta |
 | `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | Optional embeddings (OpenAI-compatible `/embeddings`); reindex after changing the model |
-| `STUDY_SEARCH_MCP_URL` / `STUDY_SEARCH_API_KEY` | Optional web-search MCP (streamable HTTP); defaults to Zhipu `web_search_prime`; unset = no web capability |
+| `STUDY_SEARCH_API_KEY` | Optional web search: defaults to Zhipu's tools API (`web-search-pro`, any ordinary Zhipu API key works); set `STUDY_SEARCH_MCP_URL` to use a remote MCP instead (plan-specific key), `STUDY_SEARCH_BASE_URL` overrides the endpoint; unset = strictly book-scoped |
 | `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | Registration policy: open signup / one-code-one-account / invite code |
 | `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | Defaults: 100 accounts / 20 books per account |
 

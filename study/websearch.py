@@ -1,11 +1,15 @@
-"""Optional web-search channel backed by a remote MCP server.
+"""Optional web-search channel: Zhipu tools API by default, remote MCP opt-in.
 
-Speaks just enough of the Model Context Protocol (streamable HTTP transport)
-to call one search tool — by default Zhipu's web_search_prime endpoint — and
-normalise its results into flat reference rows for the tutor. The channel is
-strictly opt-in: without STUDY_SEARCH_API_KEY nothing here is reachable from
-the chat flow, and failures surface as tool-level errors the model can route
-around instead of killing an answer.
+The default transport is Zhipu's OpenAI-compatible tools endpoint
+(paas/v4/tools, model web-search-pro) — the same channel and key the official
+@z_ai/mcp-server npm package uses in ZHIPU mode, so an ordinary Zhipu API key
+works. Setting STUDY_SEARCH_MCP_URL switches to a remote streamable-HTTP MCP
+server instead (e.g. the GLM Coding Plan web_search_prime endpoint, which
+requires its own plan-specific key). Either way results are normalised into
+flat reference rows for the tutor. The channel is strictly opt-in: without
+STUDY_SEARCH_API_KEY nothing here is reachable from the chat flow, and
+failures surface as tool-level errors the model can route around instead of
+killing an answer.
 """
 
 import json
@@ -18,9 +22,11 @@ import requests
 
 LOG = logging.getLogger(__name__)
 
-# GLM Coding Plan remote MCP (webSearchPrime). Any streamable-HTTP MCP server
-# exposing an equivalent tool works by overriding STUDY_SEARCH_MCP_URL.
-DEFAULT_MCP_URL = "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+# Default: Zhipu tools API (same key family as the LLM providers).
+DEFAULT_TOOLS_BASE = "https://open.bigmodel.cn/api/paas/v4"
+SEARCH_MODEL = "web-search-pro"
+# Opt-in: remote MCP server (streamable HTTP). Any server exposing an
+# equivalent search tool works by setting STUDY_SEARCH_MCP_URL.
 TOOL_NAME = "webSearchPrime"
 # The query argument name is discovered from tools/list; these are the
 # candidates tried when the server cannot be introspected.
@@ -58,9 +64,13 @@ def _normalize(name: str) -> str:
 
 class WebSearchClient:
     def __init__(self):
-        self.url = (os.getenv("STUDY_SEARCH_MCP_URL") or DEFAULT_MCP_URL).strip()
+        # Explicit MCP URL switches to the remote-MCP transport; otherwise the
+        # default Zhipu tools API is used (same key as the LLM providers).
+        self.url = (os.getenv("STUDY_SEARCH_MCP_URL") or "").strip()
+        self.mcp_mode = bool(self.url)
+        self.base = (os.getenv("STUDY_SEARCH_BASE_URL") or DEFAULT_TOOLS_BASE).strip().rstrip("/")
         self.key = os.getenv("STUDY_SEARCH_API_KEY", "").strip()
-        self.configured = bool(self.url and self.key and self._valid_url())
+        self.configured = bool(self.key and (self.url or self.base) and self._valid_url())
         self.session = requests.Session()
         self._guard = threading.Lock()
         self._mcp_session = ""
@@ -71,8 +81,9 @@ class WebSearchClient:
 
     def _valid_url(self):
         """Same contract as the LLM base: HTTPS unless local, no query/fragment."""
+        target = self.url if self.mcp_mode else self.base
         try:
-            parts = urlsplit(self.url)
+            parts = urlsplit(target)
         except ValueError:
             return False
         local = parts.hostname in {"localhost", "127.0.0.1", "::1"}
@@ -80,7 +91,40 @@ class WebSearchClient:
                 and (parts.scheme == "https" or local) and not parts.query and not parts.fragment)
 
     # ------------------------------------------------------------------
-    # JSON-RPC over streamable HTTP
+    # Default transport: Zhipu tools API (web-search-pro)
+    # ------------------------------------------------------------------
+
+    def _tools_search(self, query: str, count: int) -> list[dict]:
+        payload = {"model": SEARCH_MODEL, "stream": False,
+                   "messages": [{"role": "user", "content": query}]}
+        try:
+            with self._guard:
+                with self.session.post(self.base + "/tools", json=payload,
+                                       headers={"Authorization": "Bearer " + self.key},
+                                       timeout=(5, 40), allow_redirects=False) as response:
+                    response.raise_for_status()
+                    data = response.json()
+        except requests.RequestException as exc:
+            raise WebSearchError("联网搜索服务请求失败或超时。") from exc
+        except ValueError as exc:
+            raise WebSearchError("联网搜索服务返回了无法解析的内容。") from exc
+        if not isinstance(data, dict):
+            raise WebSearchError("联网搜索服务返回了无效响应。")
+        # web-search-pro nests results inside choices[].message.tool_calls[]
+        # (a search_intent call followed by a search_result call); older
+        # deployments may also return them at the top level.
+        items = data.get("search_result") if isinstance(data.get("search_result"), list) else []
+        if not items:
+            for choice in data.get("choices") or []:
+                for call in ((choice.get("message") or {}).get("tool_calls") or []):
+                    if isinstance(call, dict) and isinstance(call.get("search_result"), list):
+                        items.extend(call["search_result"])
+        rows = [self._row(item) for item in items]
+        rows = [row for row in rows if row["title"] or row["snippet"]]
+        return rows[:count]
+
+    # ------------------------------------------------------------------
+    # Opt-in transport: JSON-RPC over streamable HTTP (remote MCP)
     # ------------------------------------------------------------------
 
     def _post(self, payload: dict, notification=False):
@@ -239,6 +283,8 @@ class WebSearchClient:
         if not query:
             raise WebSearchError("检索词为空。")
         count = max(1, min(int(count), MAX_RESULTS))
+        if not self.mcp_mode:
+            return self._tools_search(query, count)
         with self._guard:
             try:
                 self._ensure_session()
@@ -301,7 +347,7 @@ class WebSearchClient:
                     if _http_url(item.get(key))), "")
         return {"title": pick("title", "name", "title_text"),
                 "url": url,
-                "site": pick("site_name", "siteName", "site", "source", "website", limit=120),
+                "site": pick("site_name", "siteName", "site", "source", "media", "website", limit=120),
                 "snippet": pick("snippet", "content", "description", "summary", limit=800),
                 "icon": next((_http_url(item[key]) for key in ("icon", "iconUrl", "favicon", "icon_url", "favicon_url")
                               if _http_url(item.get(key))), "")}

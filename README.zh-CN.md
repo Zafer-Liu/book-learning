@@ -40,7 +40,7 @@ flowchart LR
     G --> STATS
     G -->|"chat/completions 主备"| LLM["问答模型<br/>OpenAI 兼容"]
     G -->|"/embeddings 可选"| EMB["向量服务<br/>bge-m3"]
-    G -->|"MCP streamable HTTP 可选"| MCP["联网搜索<br/>webSearchPrime"]
+    G -->|"tools API / MCP 可选"| MCP["联网搜索<br/>web-search-pro"]
 ```
 
 **说明**:浏览器只与本服务通信(严格 CSP,无第三方请求)。检索三通道——词法、FTS5、向量——等权 RRF(k=60)融合;未配置向量服务时明确降级为关键词检索并在界面标注。联网搜索是独立开关,不开启时系统完全书内运行。
@@ -54,7 +54,7 @@ sequenceDiagram
     participant U as 用户
     participant S as 服务端
     participant M as 模型
-    participant W as 搜索 MCP(可选)
+    participant W as 搜索服务(tools API / MCP,可选)
     U->>S: 提问(POST /messages, SSE)
     S-->>U: status · 正在检索本书
     loop 自主检索 ≤ 10 次
@@ -120,7 +120,7 @@ flowchart LR
 - **证据约束生成**:如「图 4」,回答必须落在本轮检索到的证据上,没有依据则明确拒答。
 - **批注阅读器**:全文通读、引用定位上下文、划线高亮三色批注(按账户私有,不发送给模型)。
 - **长对话压缩 + 上下文计量**:如「图 3」。
-- **可选联网补充**:配置搜索 MCP(默认智谱 `webSearchPrime`)后出现开关,默认关闭;如「图 2」,仅模型提炼的检索词出网。
+- **可选联网补充**:配置 `STUDY_SEARCH_API_KEY`(默认走智谱 `web-search-pro` 工具接口,普通智谱 Key 即可;亦可改走远程 MCP)后出现开关,默认关闭;如「图 2」,仅模型提炼的检索词出网。
 - **运行日志与反馈统计**:问答 / 索引 / 联网调用逐条留痕(保留 3 天),满意 / 不满意评价沉淀为周期统计。
 
 ## 快速开始(本地)
@@ -149,7 +149,7 @@ python -m study
 | `STUDY_LLM_JSON_MODE` | 模型支持 `response_format=json_object` 时设 `1` |
 | `STUDY_LLM_FALLBACK_*` | 可选备用模型;仅首个可见增量前切换 |
 | `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | 可选向量服务(OpenAI 兼容 `/embeddings`);更换模型后需重新索引 |
-| `STUDY_SEARCH_MCP_URL` / `STUDY_SEARCH_API_KEY` | 可选联网搜索 MCP(流式 HTTP),默认智谱 `web_search_prime`;不配置则无联网能力 |
+| `STUDY_SEARCH_API_KEY` | 可选联网搜索:默认走智谱工具接口(`web-search-pro`,普通智谱 API Key 即可);设置 `STUDY_SEARCH_MCP_URL` 改走远程 MCP(需套餐专用 Key),`STUDY_SEARCH_BASE_URL` 可覆写接口地址;不配置则完全书内 |
 | `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | 注册策略:开放注册 / 一码一户测试码 / 邀请码 |
 | `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | 默认 100 账户 / 每账户 20 本教材 |
 
@@ -171,7 +171,7 @@ python -m study
 ## 隐私与边界
 
 - 教材与服务端数据按账户隔离,但**不是端到端加密**;部署管理员可访问 Volume。
-- 配置向量服务时,教材分块在索引时发送到该服务;提问时,命中的原文片段与近期问题发送到问答服务;勾选联网时,仅检索词(非完整对话)发送到搜索 MCP。
+- 配置向量服务时,教材分块在索引时发送到该服务;提问时,命中的原文片段与近期问题发送到问答服务;勾选联网时,仅检索词(非完整对话)发送到搜索服务。
 - 网络引用内容未经核实,不代表教材观点;法律类教材可能过时,回答不构成现行法律或个人法律意见。
 - 无邮件验证、密码找回、管理员面板、计费与流式中断回滚;停止等待只取消浏览器请求,后台可能仍完成。
 
@@ -183,7 +183,7 @@ study/            # Flask 后端
   tutor.py        #   证据约束生成、agent 检索循环、C/W 引用校验
   rag.py          #   词法 / FTS5 / 向量三通道 RRF 检索
   reader.py       #   全文阅读器与批注 API
-  websearch.py    #   搜索 MCP 客户端(流式 HTTP)
+  websearch.py    #   联网搜索客户端(智谱 tools API / 远程 MCP)
   compaction.py   #   长对话滚动压缩与上下文计量
   documents.py    #   md / txt / docx 解析与分块
   database.py     #   SQLite schema 与迁移
