@@ -120,6 +120,26 @@ def apply(query: str, hits: list[dict], log_fn=None) -> list[dict]:
                   f"相关度滤除 {len(dropped_rel)} 段 · 注入拦截 {len(dropped_inj)} 段 · "
                   f"{elapsed}ms · {tokens} tokens"))
 
+    # Per-chunk verdicts for the activity log (truncate aggressively so the
+    # settings panel stays readable; app_logs rows cap at 2000 chars anyway).
+    def _snippet(chunk):
+        text = (chunk.get("text") or "").replace("\n", " ").strip()
+        section = chunk.get("section") or ""
+        head = f"§{section[:24]} · " if section else ""
+        return head + text[:46]
+
+    verdicts = []
+    for _, chunk, rel in kept:
+        verdicts.append(f"✅ 放行 id={chunk.get('id')} rel={chunk.get('jev_rel')} inj={chunk.get('jev_inj')} · {_snippet(chunk)}")
+    for i in dropped_rel:
+        chunk = next(c for j, c in indexed if j == i)
+        verdicts.append(f"✂️ 滤除 id={chunk.get('id')} rel={chunk.get('jev_rel')} inj={chunk.get('jev_inj')} · {_snippet(chunk)}")
+    for i in dropped_inj:
+        chunk = next(c for j, c in indexed if j == i)
+        verdicts.append(f"⛔ 拦截 id={chunk.get('id')} rel={chunk.get('jev_rel')} inj={chunk.get('jev_inj')} · {_snippet(chunk)}")
+    if verdicts:
+        note("info", "闸门明细 · " + " | ".join(verdicts[:6]) + (" | …" if len(verdicts) > 6 else ""))
+
     if not kept:
         # Zero survivors is a judgment we do not trust enough to starve the
         # pipeline: fall back with a visible warning rather than an empty answer.
