@@ -903,7 +903,10 @@ def create_app(test_config=None):
                             started = time.monotonic()
                             word_list = terms(agent_query)
                             agent_state["word_set"].update(word_list)
-                            result = retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit)
+                            result = retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit,
+                                              gate_hook=lambda event, level, detail: add_log(
+                                                  event, level=level,
+                                                  detail=detail + f" · 问: {question[:40]}", owner_id=owner))
                             agent_state["backend"] = result["backend"]
                             agent_state["degraded"] = result["degraded"]
                             agent_state["ms"] += int((time.monotonic() - started) * 1000)
@@ -979,7 +982,10 @@ def create_app(test_config=None):
                             retrieval.pop("evidence", None)
                     if answer is None:
                         retrieve_started = time.monotonic()
-                        result = retrieve(query, chunks, fts_lookup(search_terms), embedder)
+                        result = retrieve(query, chunks, fts_lookup(search_terms), embedder,
+                                          gate_hook=lambda event, level, detail: add_log(
+                                              event, level=level,
+                                              detail=detail + f" · 问: {question[:40]}", owner_id=owner))
                         retrieve_ms = int((time.monotonic() - retrieve_started) * 1000)
                         overview = mode in {"outline", "quiz", "explain"} and not search_terms
                         if overview and chunks:

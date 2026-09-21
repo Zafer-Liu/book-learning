@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 import jieba
 import requests
 
+from . import jev_gate
+
 STOP_WORDS = frozenset("请 请问 帮我 帮 帮助 解释 讲解 梳理 总结 自测 出题 教材 本书 本章 章节 这个 那个 什么 如何 为什么 一个 一些 进行 关于 根据 内容 知识点 的 了 是 在 和 与 或 就 都 吗 呢 把 将 用 以及 并且 可以 我 你 它 继续 详细 简单 通俗 学习 核心 要点 重点 这本书 这本 给我 三道 问题 自测题 练习 理解 当前 范围".split())
 
 
@@ -122,7 +124,8 @@ def lexical_score(query: str, text: str) -> float:
     return phrase + english + chinese
 
 
-def retrieve(query: str, chunks: list[dict], fts_ids: list[int], embedder: EmbeddingClient, limit=6) -> dict:
+def retrieve(query: str, chunks: list[dict], fts_ids: list[int], embedder: EmbeddingClient,
+             limit=6, gate_hook=None) -> dict:
     if not chunks:
         return {"hits": [], "backend": "lexical+fts5", "degraded": True}
     allowed = {chunk["id"]: chunk for chunk in chunks}
@@ -158,6 +161,9 @@ def retrieve(query: str, chunks: list[dict], fts_ids: list[int], embedder: Embed
         hit = {k: v for k, v in allowed[key].items() if k not in {"embedding", "embedding_space"}}
         hit.update(rrf_score=scores[key], lexical_score=lexical[key], vector_score=vector_scores.get(key, 0))
         hits.append(hit)
+    # Jev quality gate (P1): best-effort relevance/injection filter over the
+    # fused candidates. Unconfigured, down, or misbehaving -> hits untouched.
+    hits = jev_gate.apply(query, hits, log_fn=gate_hook)
     return {"hits": hits, "backend": "vector+lexical+fts5" if vector_active else "lexical+fts5",
             "degraded": not vector_active}
 
