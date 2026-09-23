@@ -222,10 +222,10 @@ def create_app(test_config=None):
             with database.connect() as db:
                 row = db.execute("SELECT id,username,api_key FROM users WHERE id=?", (user_id,)).fetchone()
                 g.user = dict(row) if row else None
-        # The deployer-only test-code report authenticates with its own key
-        # instead of a session; the route hides itself (404) when the key is
-        # unset or wrong.
-        if request.path == "/api/admin/test-codes":
+        # The deployer-only admin reports authenticate with their own key
+        # instead of a session; the routes hide themselves (404) when the key
+        # is unset or wrong.
+        if request.path.startswith("/api/admin/"):
             expected = os.getenv("STUDY_ADMIN_KEY", "")
             supplied = request.headers.get("X-Admin-Key", "")
             if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
@@ -411,6 +411,50 @@ def create_app(test_config=None):
         bound = sum(1 for item in codes if item["bound"])
         return jsonify(total=len(codes), bound=bound, open=len(codes) - bound, codes=codes)
 
+    @app.get("/api/admin/overview")
+    def admin_overview():
+        # Deployer-only operations report: per-account activity plus the recent
+        # global log stream (app_logs only retains LOG_RETENTION days); guarded
+        # in protect() by STUDY_ADMIN_KEY, never by a user session.
+        days = min(max(int(request.args.get("days", "3") or 3), 1), int(LOG_RETENTION.days))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="microseconds")
+        with database.connect() as db:
+            users = db.execute("SELECT id, username, created_at FROM users ORDER BY created_at").fetchall()
+            names = {row["id"]: row["username"] for row in users}
+            names[BUILTIN_OWNER] = "内置书库"
+            accounts = []
+            for row in users:
+                owner = row["id"]
+                shelf = db.execute(
+                    "SELECT category, SUM(status='ready') ready, COUNT(*) total "
+                    "FROM books WHERE owner_id=? GROUP BY category", (owner,)).fetchall()
+                questions = db.execute(
+                    "SELECT COUNT(*) c, MAX(created_at) last FROM messages "
+                    "WHERE owner_id=? AND role='user'", (owner,)).fetchone()
+                window = db.execute(
+                    "SELECT COUNT(*) c FROM messages WHERE owner_id=? AND role='user' AND created_at>=?",
+                    (owner, cutoff)).fetchone()
+                conversations = db.execute(
+                    "SELECT COUNT(*) c FROM conversations WHERE owner_id=?", (owner,)).fetchone()
+                notes = db.execute(
+                    "SELECT COUNT(*) c FROM annotations WHERE owner_id=?", (owner,)).fetchone()
+                issues = db.execute(
+                    "SELECT COUNT(*) c FROM app_logs WHERE owner_id=? AND level IN ('error','warning') "
+                    "AND created_at>=?", (owner, cutoff)).fetchone()
+                accounts.append({
+                    "username": row["username"], "created_at": row["created_at"],
+                    "books": {item["category"]: {"ready": item["ready"], "total": item["total"]} for item in shelf},
+                    "conversations": conversations["c"], "questions": questions["c"],
+                    "questions_window": window["c"], "annotations": notes["c"],
+                    "last_question_at": questions["last"], "issues_window": issues["c"]})
+            logs = db.execute(
+                "SELECT created_at, owner_id, level, event, detail FROM app_logs "
+                "WHERE created_at>=? ORDER BY id DESC LIMIT 200", (cutoff,)).fetchall()
+        return jsonify(days=days, accounts=accounts,
+                       logs=[{"created_at": row["created_at"], "username": names.get(row["owner_id"], "系统"),
+                              "level": row["level"], "event": row["event"], "detail": row["detail"]}
+                             for row in logs])
+
     @app.get("/api/logs")
     def logs():
         # login_failed rows carry no owner and contain no secrets, so they stay visible;
@@ -466,9 +510,16 @@ def create_app(test_config=None):
 
     @app.get("/api/books")
     def books():
+        category = request.args.get("category")
+        if category and category not in ("textbook", "literature"):
+            abort(400, description="分类参数无效。")
         with database.connect() as db:
-            rows = db.execute("SELECT * FROM books WHERE owner_id IN (?, ?) ORDER BY created_at DESC",
-                              (g.user["id"], BUILTIN_OWNER)).fetchall()
+            if category:
+                rows = db.execute("SELECT * FROM books WHERE owner_id IN (?, ?) AND category=? ORDER BY created_at DESC",
+                                  (g.user["id"], BUILTIN_OWNER, category)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM books WHERE owner_id IN (?, ?) AND category != 'group' ORDER BY created_at DESC",
+                                  (g.user["id"], BUILTIN_OWNER)).fetchall()
         return jsonify(books=[public_book(row) for row in rows])
 
     @app.post("/api/books")
@@ -483,6 +534,9 @@ def create_app(test_config=None):
         title = (request.form.get("title") or Path(filename).stem).strip()[:120]
         if not title:
             abort(400, description="请输入教材名称。")
+        category = (request.form.get("category") or "textbook").strip()
+        if category not in ("textbook", "literature"):
+            abort(400, description="分类参数无效。")
         owner = g.user["id"]
         account_lock = lock_for(user_locks, owner)
         if not account_lock.acquire(blocking=False):
@@ -516,8 +570,8 @@ def create_app(test_config=None):
             book_lock = lock_for(book_locks, book_id)
             book_lock.acquire()
             with database.connect() as db:
-                db.execute("INSERT INTO books(id,owner_id,title,filename,source_path,created_at) VALUES(?,?,?,?,?,?)",
-                           (book_id, owner, title, filename, str(source.relative_to(root)), now()))
+                db.execute("INSERT INTO books(id,owner_id,title,filename,source_path,created_at,category) VALUES(?,?,?,?,?,?,?)",
+                           (book_id, owner, title, filename, str(source.relative_to(root)), now(), category))
                 row = db.execute("SELECT * FROM books WHERE id=? AND owner_id=?", (book_id, owner)).fetchone()
             executor.submit(index_book, owner, book_id, source, filename, book_lock)
             queued = True
@@ -536,6 +590,14 @@ def create_app(test_config=None):
     def book_detail(book_id):
         with database.connect() as db:
             row = book_row(db, book_id)
+            if row["category"] == "group":
+                members = db.execute(
+                    "SELECT b.id, b.title, b.status FROM group_members gm "
+                    "JOIN books b ON b.id=gm.book_id WHERE gm.group_id=?",
+                    (book_id,)).fetchall()
+                item = public_book(row)
+                item["members"] = [dict(m) for m in members]
+                return jsonify(book=item, sections=[])
             sections = db.execute("SELECT section AS name,count(*) AS chunk_count FROM chunks "
                                   "WHERE owner_id IN (?, ?) AND book_id=? GROUP BY section ORDER BY min(ordinal)",
                                   (g.user["id"], BUILTIN_OWNER, book_id)).fetchall()
@@ -553,7 +615,8 @@ def create_app(test_config=None):
             with database.connect() as db:
                 book_row(db, book_id)
                 db.execute("DELETE FROM books WHERE id=? AND owner_id=?", (book_id, g.user["id"]))
-            (root / row["source_path"]).unlink(missing_ok=True)
+            if row["source_path"]:
+                (root / row["source_path"]).unlink(missing_ok=True)
         finally:
             book_lock.release()
         return jsonify(ok=True)
@@ -564,6 +627,8 @@ def create_app(test_config=None):
         with database.connect() as db:
             row = book_row(db, book_id)
             require_own_book(row)
+            if row["category"] == "group":
+                abort(400, description="文献组无需索引。")
         book_lock = lock_for(book_locks, book_id)
         if not book_lock.acquire(blocking=False):
             abort(409, description="教材正在处理，请稍后重试。")
@@ -589,6 +654,8 @@ def create_app(test_config=None):
         with database.connect() as db:
             row = book_row(db, book_id)
             require_own_book(row)
+            if row["category"] == "group":
+                abort(400, description="文献组没有原文件。")
         path = root / row["source_path"]
         if not path.is_file():
             abort(404, description="教材原文件不存在，请重新上传。")
@@ -673,6 +740,144 @@ def create_app(test_config=None):
         # Sentence-level semantic evidence locating for the reference panel;
         # empty ranges simply keep the keyword highlighting as-is.
         return jsonify(ranges=semantic_sentence_ranges(embedder, question, row["text"]))
+
+    # ------------------------------------------------------------------
+    # Literature groups
+    # ------------------------------------------------------------------
+
+    @app.get("/api/groups")
+    def list_groups():
+        with database.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM books WHERE owner_id=? AND category='group' ORDER BY created_at DESC",
+                (g.user["id"],)).fetchall()
+            groups = []
+            for row in rows:
+                members = db.execute(
+                    "SELECT b.id, b.title, b.status FROM group_members gm "
+                    "JOIN books b ON b.id=gm.book_id WHERE gm.group_id=?",
+                    (row["id"],)).fetchall()
+                item = public_book(row)
+                item["members"] = [dict(m) for m in members]
+                groups.append(item)
+        return jsonify(groups=groups)
+
+    @app.post("/api/groups")
+    def create_group():
+        data = body()
+        name = (data.get("name") or "").strip()[:120]
+        book_ids = data.get("book_ids")
+        if not name:
+            abort(400, description="请输入组名。")
+        if not isinstance(book_ids, list) or not 2 <= len(book_ids) <= 20:
+            abort(400, description="组内至少 2 篇、至多 20 篇文献。")
+        throttle(("create-group", g.user["id"]), 30, 3600)
+        owner = g.user["id"]
+        with database.connect() as db:
+            count = db.execute("SELECT count(*) FROM books WHERE owner_id=? AND category='group'",
+                               (owner,)).fetchone()[0]
+            if count >= 50:
+                abort(400, description="文献组数量已达上限（50）。")
+            # Validate all member books
+            placeholders = ",".join("?" * len(book_ids))
+            members = db.execute(
+                f"SELECT id, title, category, status, owner_id FROM books WHERE id IN ({placeholders})",
+                book_ids).fetchall()
+            found = {m["id"] for m in members}
+            for bid in book_ids:
+                if bid not in found:
+                    abort(400, description=f"文献 {bid[:8]}… 不存在。")
+            for m in members:
+                if m["owner_id"] not in (owner, BUILTIN_OWNER):
+                    abort(403, description=f"无权访问「{m['title'][:30]}」。")
+                if m["category"] != "literature":
+                    abort(400, description=f"「{m['title'][:30]}」不是文献，无法加入组。")
+                if m["status"] != "ready":
+                    abort(409, description=f"「{m['title'][:30]}」尚未完成索引。")
+            group_id = uid()
+            db.execute(
+                "INSERT INTO books(id,owner_id,title,filename,source_path,status,created_at,category) "
+                "VALUES(?,?,?,?,?,'ready',?,?)",
+                (group_id, owner, name, "", "", now(), "group"))
+            for bid in book_ids:
+                db.execute("INSERT INTO group_members(group_id,book_id) VALUES(?,?)", (group_id, bid))
+            row = db.execute("SELECT * FROM books WHERE id=?", (group_id,)).fetchone()
+        add_log("group_created", detail=f"创建文献组「{name}」· {len(book_ids)} 篇", owner_id=owner)
+        return jsonify(group=public_book(row)), 201
+
+    @app.get("/api/groups/<group_id>")
+    def group_detail(group_id):
+        with database.connect() as db:
+            row = db.execute("SELECT * FROM books WHERE id=? AND owner_id=? AND category='group'",
+                             (group_id, g.user["id"])).fetchone()
+            if row is None:
+                abort(404, description="文献组不存在。")
+            members = db.execute(
+                "SELECT b.id, b.title, b.status, b.category FROM group_members gm "
+                "JOIN books b ON b.id=gm.book_id WHERE gm.group_id=?",
+                (group_id,)).fetchall()
+        item = public_book(row)
+        item["members"] = [dict(m) for m in members]
+        return jsonify(group=item)
+
+    @app.patch("/api/groups/<group_id>")
+    def update_group(group_id):
+        data = body()
+        with database.connect() as db:
+            row = db.execute("SELECT * FROM books WHERE id=? AND owner_id=? AND category='group'",
+                             (group_id, g.user["id"])).fetchone()
+            if row is None:
+                abort(404, description="文献组不存在。")
+            if "name" in data:
+                name = (data["name"] or "").strip()[:120]
+                if not name:
+                    abort(400, description="组名不能为空。")
+                db.execute("UPDATE books SET title=? WHERE id=?", (name, group_id))
+            if "book_ids" in data:
+                book_ids = data["book_ids"]
+                if not isinstance(book_ids, list) or not 2 <= len(book_ids) <= 20:
+                    abort(400, description="组内至少 2 篇、至多 20 篇文献。")
+                owner = g.user["id"]
+                placeholders = ",".join("?" * len(book_ids))
+                members = db.execute(
+                    f"SELECT id, title, category, status, owner_id FROM books WHERE id IN ({placeholders})",
+                    book_ids).fetchall()
+                found = {m["id"] for m in members}
+                for bid in book_ids:
+                    if bid not in found:
+                        abort(400, description=f"文献 {bid[:8]}… 不存在。")
+                for m in members:
+                    if m["owner_id"] not in (owner, BUILTIN_OWNER):
+                        abort(403, description=f"无权访问「{m['title'][:30]}」。")
+                    if m["category"] != "literature":
+                        abort(400, description=f"「{m['title'][:30]}」不是文献。")
+                    if m["status"] != "ready":
+                        abort(409, description=f"「{m['title'][:30]}」尚未完成索引。")
+                db.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+                for bid in book_ids:
+                    db.execute("INSERT INTO group_members(group_id,book_id) VALUES(?,?)", (group_id, bid))
+                # Conversations may reference stale chunks after membership change.
+                db.execute("DELETE FROM conversations WHERE book_id=? AND owner_id=?", (group_id, owner))
+            row = db.execute("SELECT * FROM books WHERE id=?", (group_id,)).fetchone()
+            members = db.execute(
+                "SELECT b.id, b.title, b.status FROM group_members gm "
+                "JOIN books b ON b.id=gm.book_id WHERE gm.group_id=?",
+                (group_id,)).fetchall()
+        item = public_book(row)
+        item["members"] = [dict(m) for m in members]
+        return jsonify(group=item)
+
+    @app.delete("/api/groups/<group_id>")
+    def delete_group(group_id):
+        with database.connect() as db:
+            row = db.execute("SELECT * FROM books WHERE id=? AND owner_id=? AND category='group'",
+                             (group_id, g.user["id"])).fetchone()
+            if row is None:
+                abort(404, description="文献组不存在。")
+            # CASCADE removes group_members and conversations
+            db.execute("DELETE FROM books WHERE id=? AND owner_id=?", (group_id, g.user["id"]))
+        add_log("group_deleted", detail=f"删除文献组「{row['title'][:40]}」", owner_id=g.user["id"])
+        return jsonify(ok=True)
 
     @app.get("/api/books/<book_id>/conversations")
     def conversations(book_id):
@@ -829,6 +1034,9 @@ def create_app(test_config=None):
 
         def stream():
             try:
+                is_group = False
+                member_ids = []
+                book_titles = {}  # book_id -> title for group citation attribution
                 yield sse({"type": "status", "stage": "retrieve", "text": "正在检索本书相关内容…"})
                 with database.connect() as db:
                     book = book_row(db, book_id)
@@ -841,6 +1049,17 @@ def create_app(test_config=None):
                         add_log("chat_error", level="error", detail=f"教材尚未完成索引 · 问: {question[:60]}", owner_id=owner)
                         yield sse({"type": "error", "error": "请等待教材完成索引。"})
                         return
+                    is_group = book["category"] == "group"
+                    if is_group:
+                        members = db.execute(
+                            "SELECT b.id, b.title FROM group_members gm "
+                            "JOIN books b ON b.id=gm.book_id WHERE gm.group_id=?",
+                            (book_id,)).fetchall()
+                        member_ids = [m["id"] for m in members]
+                        book_titles = {m["id"]: m["title"] for m in members}
+                        if not member_ids:
+                            yield sse({"type": "error", "error": "文献组内没有成员。"})
+                            return
                     old = db.execute("SELECT * FROM messages WHERE owner_id=? AND book_id=? AND conversation_id=? ORDER BY created_at DESC LIMIT 120",
                                      (owner, book_id, conversation_id)).fetchall()
                     if len(old) >= 120:
@@ -848,12 +1067,17 @@ def create_app(test_config=None):
                         yield sse({"type": "error", "error": "当前对话已满，请新建学习对话。"})
                         return
                     # Scope filtering happens in SQL before any channel sees candidates.
-                    sql, params = "SELECT * FROM chunks WHERE owner_id IN (?, ?) AND book_id=?", [owner, BUILTIN_OWNER, book_id]
-                    if section is not None:
-                        sql += " AND section=?"
-                        params.append(section)
+                    if is_group:
+                        ph = ",".join("?" * len(member_ids))
+                        sql = f"SELECT * FROM chunks WHERE owner_id IN (?, ?) AND book_id IN ({ph})"
+                        params = [owner, BUILTIN_OWNER] + member_ids
+                    else:
+                        sql, params = "SELECT * FROM chunks WHERE owner_id IN (?, ?) AND book_id=?", [owner, BUILTIN_OWNER, book_id]
+                        if section is not None:
+                            sql += " AND section=?"
+                            params.append(section)
                     rows = db.execute(sql + " ORDER BY ordinal", params).fetchall()
-                    if section is not None and not rows:
+                    if not is_group and section is not None and not rows:
                         add_log("chat_error", level="error", detail=f"章节「{section}」不存在或已失效 · 问: {question[:60]}", owner_id=owner)
                         yield sse({"type": "error", "error": "章节不存在或已失效，请重新选择。"})
                         return
@@ -861,6 +1085,8 @@ def create_app(test_config=None):
                     for row in rows:
                         chunk = dict(row)
                         chunk["embedding"] = json.loads(chunk["embedding"]) if chunk["embedding"] else None
+                        if is_group:
+                            chunk["book_title"] = book_titles.get(chunk["book_id"], "")
                         chunks.append(chunk)
                     previous = [row["content"] for row in reversed(old) if row["role"] == "user"][-3:]
                     query = question
@@ -872,12 +1098,18 @@ def create_app(test_config=None):
                         if not word_list:
                             return []
                         match = " OR ".join('"' + word.replace('"', '""') + '"' for word in word_list)
-                        fts_sql = ("SELECT c.id FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid "
-                                   "WHERE chunks_fts MATCH ? AND c.owner_id IN (?, ?) AND c.book_id=?")
-                        fts_params = [match, owner, BUILTIN_OWNER, book_id]
-                        if section is not None:
-                            fts_sql += " AND c.section=?"
-                            fts_params.append(section)
+                        if is_group:
+                            ph = ",".join("?" * len(member_ids))
+                            fts_sql = ("SELECT c.id FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid "
+                                       f"WHERE chunks_fts MATCH ? AND c.owner_id IN (?, ?) AND c.book_id IN ({ph})")
+                            fts_params = [match, owner, BUILTIN_OWNER] + member_ids
+                        else:
+                            fts_sql = ("SELECT c.id FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid "
+                                       "WHERE chunks_fts MATCH ? AND c.owner_id IN (?, ?) AND c.book_id=?")
+                            fts_params = [match, owner, BUILTIN_OWNER, book_id]
+                            if section is not None:
+                                fts_sql += " AND c.section=?"
+                                fts_params.append(section)
                         try:
                             with database.connect() as db:
                                 return [row[0] for row in db.execute(
@@ -923,11 +1155,12 @@ def create_app(test_config=None):
                             return searcher.search(web_query, 6)
 
                         yield sse({"type": "status", "stage": "generate",
-                                   "text": "模型正在自主检索本书并核对引用…"})
+                                   "text": "模型正在自主检索文献组并核对引用…" if is_group else "模型正在自主检索本书并核对引用…"})
                         try:
                             for kind, value in tutor.agent_stream(question, mode, book["title"], run_agent_search,
                                                                   previous, retrieval, user_key, summary,
-                                                                  run_web_search if web_enabled else None):
+                                                                  run_web_search if web_enabled else None,
+                                                                  is_group=is_group):
                                 if kind == "search":
                                     # Every tool call becomes a visible UI step,
                                     # a dedicated log row and persisted metadata.
@@ -1006,7 +1239,8 @@ def create_app(test_config=None):
                         if mode != "quiz":
                             try:
                                 for kind, value in tutor.generate_stream(question, mode, book["title"], result["hits"],
-                                                                         previous, retrieval, user_key, summary):
+                                                                         previous, retrieval, user_key, summary,
+                                                                         is_group=is_group):
                                     if kind == "delta":
                                         streamed = True
                                         yield sse({"type": "delta", "text": value})
@@ -1101,7 +1335,7 @@ def create_app(test_config=None):
         return Response(stream_with_context(stream()), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    def seed_builtin_book(path: Path):
+    def seed_builtin_book(path: Path, category: str = "textbook"):
         title = path.stem[:120]
         with database.connect() as db:
             row = db.execute("SELECT * FROM books WHERE owner_id=? AND title=?",
@@ -1126,20 +1360,20 @@ def create_app(test_config=None):
                     folder.mkdir(parents=True, exist_ok=True)
                     source = folder / (book_id + path.suffix.lower())
                     shutil.copyfile(path, source)
-                    db.execute("INSERT INTO books(id,owner_id,title,filename,source_path,created_at) VALUES(?,?,?,?,?,?)",
-                               (book_id, BUILTIN_OWNER, title, path.name, str(source.relative_to(root)), now()))
+                    db.execute("INSERT INTO books(id,owner_id,title,filename,source_path,created_at,category) VALUES(?,?,?,?,?,?,?)",
+                               (book_id, BUILTIN_OWNER, title, path.name, str(source.relative_to(root)), now(), category))
                 else:
                     source = root / row["source_path"]
                     if not source.is_file() or source.read_bytes() != path.read_bytes():
                         shutil.copyfile(path, source)
                     # Old citations must never refer to new chunks after a content update.
                     db.execute("DELETE FROM conversations WHERE book_id=?", (book_id,))
-                db.execute("UPDATE books SET status='queued',error='',filename=? WHERE id=? AND owner_id=?",
-                           (path.name, book_id, BUILTIN_OWNER))
+                db.execute("UPDATE books SET status='queued',error='',filename=?,category=? WHERE id=? AND owner_id=?",
+                           (path.name, category, book_id, BUILTIN_OWNER))
             # The dedicated seed thread may wait without delaying web requests.
             index_slots.acquire()
             reserved = True
-            LOG.info("Seeding builtin book: %s", title)
+            LOG.info("Seeding builtin book: %s [%s]", title, category)
             executor.submit(index_book, BUILTIN_OWNER, book_id, source, path.name, book_lock)
             queued = True
         finally:
@@ -1149,7 +1383,9 @@ def create_app(test_config=None):
                     index_slots.release()
 
     def seed_builtin_books():
-        # Baked-in textbooks ship with the image; every account can read them.
+        # Baked-in textbooks and literature ship with the image; every account
+        # can read them. Files in builtin_books/ root are textbooks; files in
+        # builtin_books/literature/ are literature.
         folder = ROOT / "builtin_books"
         if not folder.is_dir():
             return
@@ -1165,9 +1401,18 @@ def create_app(test_config=None):
             if not path.is_file() or path.suffix.lower() not in FORMATS:
                 continue
             try:
-                seed_builtin_book(path)
+                seed_builtin_book(path, "textbook")
             except Exception:
                 LOG.exception("Builtin book seeding failed: %s", path.name)
+        literature_folder = folder / "literature"
+        if literature_folder.is_dir():
+            for path in sorted(literature_folder.iterdir()):
+                if not path.is_file() or path.suffix.lower() not in FORMATS:
+                    continue
+                try:
+                    seed_builtin_book(path, "literature")
+                except Exception:
+                    LOG.exception("Builtin literature seeding failed: %s", path.name)
 
     def refresh_feedback_stats():
         """Fold the permanent feedback_archive into fixed 3-day periods.

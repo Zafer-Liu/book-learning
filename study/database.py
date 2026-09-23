@@ -20,9 +20,15 @@ CREATE TABLE IF NOT EXISTS books (
     status TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '',
     chunk_count INTEGER NOT NULL DEFAULT 0, section_count INTEGER NOT NULL DEFAULT 0,
     index_backend TEXT NOT NULL DEFAULT 'lexical', created_at TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'textbook' CHECK(category IN ('textbook','literature','group')),
     UNIQUE(owner_id, id)
 );
 CREATE INDEX IF NOT EXISTS books_owner ON books(owner_id, created_at);
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, book_id)
+);
 CREATE TABLE IF NOT EXISTS chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id TEXT NOT NULL, book_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL, section TEXT NOT NULL, page INTEGER,
@@ -113,6 +119,11 @@ class Database:
                 db.execute("ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
             if "summary_mark" not in columns:
                 db.execute("ALTER TABLE conversations ADD COLUMN summary_mark TEXT NOT NULL DEFAULT ''")
+            # Older deployments have no category column on books.
+            columns = [row[1] for row in db.execute("PRAGMA table_info(books)")]
+            if "category" not in columns:
+                db.execute("ALTER TABLE books ADD COLUMN category TEXT NOT NULL DEFAULT 'textbook'")
+            self._migrate_books_category_check(db)
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(tokens)")
             db.executescript("""
                 CREATE TRIGGER IF NOT EXISTS chunks_delete_fts AFTER DELETE ON chunks BEGIN
@@ -154,6 +165,33 @@ class Database:
             ALTER TABLE messages_v2 RENAME TO messages;
             CREATE INDEX conversations_scope ON conversations(owner_id, book_id);
             CREATE INDEX messages_scope ON messages(owner_id, book_id, conversation_id, created_at);
+            COMMIT;
+        """)
+        db.execute("PRAGMA foreign_keys=ON")
+
+    @staticmethod
+    def _migrate_books_category_check(db):
+        """Rebuild books table if its CHECK constraint lacks 'group'."""
+        row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='books'").fetchone()
+        if not row or "'group'" in row["sql"]:
+            return
+        db.execute("PRAGMA foreign_keys=OFF")
+        db.executescript("""
+            BEGIN;
+            CREATE TABLE books_v2 (
+                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
+                title TEXT NOT NULL, filename TEXT NOT NULL, source_path TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued', error TEXT NOT NULL DEFAULT '',
+                chunk_count INTEGER NOT NULL DEFAULT 0, section_count INTEGER NOT NULL DEFAULT 0,
+                index_backend TEXT NOT NULL DEFAULT 'lexical', created_at TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'textbook' CHECK(category IN ('textbook','literature','group')),
+                UNIQUE(owner_id, id)
+            );
+            INSERT INTO books_v2 SELECT id,owner_id,title,filename,source_path,status,error,
+                chunk_count,section_count,index_backend,created_at,category FROM books;
+            DROP TABLE books;
+            ALTER TABLE books_v2 RENAME TO books;
+            CREATE INDEX IF NOT EXISTS books_owner ON books(owner_id, created_at);
             COMMIT;
         """)
         db.execute("PRAGMA foreign_keys=ON")

@@ -2,11 +2,12 @@ import { createReader } from './reader.js';
 
 const $ = (selector) => document.querySelector(selector);
 const state = {
-  user: null, csrf: '', config: null, books: [], book: null, sections: [],
+  user: null, csrf: '', config: null, books: [], groups: [], book: null, sections: [],
   conversations: [], conversation: null, messages: [], mode: 'qa', epoch: 0,
   pending: false, loading: false, registering: false, registrationOpen: false,
   testCodeRegistration: false, apiKeySet: false, controllers: new Set(), poll: null,
   statusText: '', typing: null, streamText: '', searchSteps: [], context: null,
+  category: 'textbook', editingGroup: null,
 };
 const modeNames = { qa: '教材问答', explain: '章节讲解', outline: '要点梳理', quiz: '自测练习' };
 const statusNames = { queued: '等待索引', indexing: '正在建立索引', ready: '可以学习', error: '索引失败' };
@@ -242,25 +243,63 @@ async function enterWorkspace(user) {
 }
 
 function renderLibrary() {
-  $('#book-count').textContent = state.books.length;
   const list = $('#book-list');
   list.replaceChildren();
-  if (!state.books.length) {
-    list.append(element('p', 'library-empty', '书架还空着。点击右上角“＋”，上传第一本 Markdown 教材。'));
-    return;
+  if (state.category === 'literature') {
+    // Render groups first, then individual literature
+    const readyGroups = state.groups;
+    const filtered = state.books.filter((b) => (b.category || 'textbook') === 'literature');
+    $('#book-count').textContent = filtered.length + readyGroups.length;
+    if (!filtered.length && !readyGroups.length) {
+      list.append(element('p', 'library-empty', '书架还空着。点击右上角“＋”，上传第一份文献。'));
+      return;
+    }
+    readyGroups.forEach((group) => {
+      const button = element('button', `book-item group-item${state.book?.id === group.id ? ' active' : ''}`);
+      button.setAttribute('aria-pressed', String(state.book?.id === group.id));
+      const info = element('span', 'book-info');
+      const name = element('span', 'book-name', group.title);
+      name.append(element('span', 'book-badge group-badge', '组'));
+      const memberNames = (group.members || []).map((m) => m.title).join('、');
+      info.append(name, element('span', 'book-meta', `${(group.members || []).length} 篇文献`));
+      button.append(element('span', 'book-spine group-spine', group.title.slice(0, 1) || '组'), info);
+      action(button, 'click', () => selectBook(group.id, true, false));
+      // Long-press / right-click to edit group
+      button.addEventListener('contextmenu', (e) => { e.preventDefault(); openGroupDialog(group); });
+      list.append(button);
+    });
+    filtered.forEach((book) => {
+      const button = element('button', `book-item${state.book?.id === book.id ? ' active' : ''}`);
+      button.setAttribute('aria-pressed', String(state.book?.id === book.id));
+      const info = element('span', 'book-info');
+      const name = element('span', 'book-name', book.title);
+      if (book.builtin) name.append(element('span', 'book-badge', '内置'));
+      info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
+        book.status === 'ready' ? `${book.section_count} 个章节 · ${book.chunk_count} 段` : statusNames[book.status] || book.status));
+      button.append(element('span', 'book-spine', book.title.slice(0, 1) || '文'), info);
+      action(button, 'click', () => selectBook(book.id, true, true));
+      list.append(button);
+    });
+  } else {
+    const filtered = state.books.filter((book) => (book.category || 'textbook') === state.category);
+    $('#book-count').textContent = filtered.length;
+    if (!filtered.length) {
+      list.append(element('p', 'library-empty', '书架还空着。点击右上角“＋”，上传第一份教材。'));
+      return;
+    }
+    filtered.forEach((book) => {
+      const button = element('button', `book-item${state.book?.id === book.id ? ' active' : ''}`);
+      button.setAttribute('aria-pressed', String(state.book?.id === book.id));
+      const info = element('span', 'book-info');
+      const name = element('span', 'book-name', book.title);
+      if (book.builtin) name.append(element('span', 'book-badge', '内置'));
+      info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
+        book.status === 'ready' ? `${book.section_count} 个章节 · ${book.chunk_count} 段` : statusNames[book.status] || book.status));
+      button.append(element('span', 'book-spine', book.title.slice(0, 1) || '书'), info);
+      action(button, 'click', () => selectBook(book.id, true, true));
+      list.append(button);
+    });
   }
-  state.books.forEach((book) => {
-    const button = element('button', `book-item${state.book?.id === book.id ? ' active' : ''}`);
-    button.setAttribute('aria-pressed', String(state.book?.id === book.id));
-    const info = element('span', 'book-info');
-    const name = element('span', 'book-name', book.title);
-    if (book.builtin) name.append(element('span', 'book-badge', '内置'));
-    info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
-      book.status === 'ready' ? `${book.section_count} 个章节 · ${book.chunk_count} 段` : statusNames[book.status] || book.status));
-    button.append(element('span', 'book-spine', book.title.slice(0, 1) || '书'), info);
-    action(button, 'click', () => selectBook(book.id, true, true));
-    list.append(button);
-  });
 }
 
 function schedulePoll() {
@@ -272,11 +311,13 @@ function schedulePoll() {
 }
 
 async function refreshBooks() {
-  const { books } = await api('/api/books');
+  const [{ books }, { groups }] = await Promise.all([api('/api/books'), api('/api/groups')]);
   state.books = books;
+  state.groups = groups || [];
   renderLibrary();
   if (state.book) {
-    const current = books.find((book) => book.id === state.book.id);
+    const current = books.find((book) => book.id === state.book.id)
+      || state.groups.find((g) => g.id === state.book.id);
     if (!current) {
       invalidate();
       state.book = null;
@@ -298,14 +339,14 @@ function resetStudy() {
   state.sections = [];
   $('#question').value = '';
   $('#section-select').replaceChildren(new Option('整本教材', ''));
-  $('#conversation-select').replaceChildren(new Option('新的学习对话', ''));
   clearEvidence();
 }
 
 async function selectBook(bookId, showPanel = true, openReader = false) {
   const epoch = invalidate();
   resetStudy();
-  state.book = state.books.find((book) => book.id === bookId) || null;
+  state.book = state.books.find((book) => book.id === bookId)
+    || state.groups.find((g) => g.id === bookId) || null;
   state.loading = true;
   if (showPanel) panel('study');
   renderLibrary();
@@ -313,18 +354,19 @@ async function selectBook(bookId, showPanel = true, openReader = false) {
   try {
     const detail = await api(`/api/books/${bookId}`);
     state.book = detail.book;
-    state.sections = detail.sections;
-    $('#section-select').replaceChildren(new Option('整本教材', ''));
-    detail.sections.forEach((section) => $('#section-select').add(new Option(`${section.name} · ${section.chunk_count} 段`, section.name)));
+    state.sections = detail.sections || [];
+    const isGroup = detail.book.category === 'group';
+    $('#section-select').replaceChildren(new Option(isGroup ? '全部文献' : '整本教材', ''));
+    if (!isGroup) {
+      detail.sections.forEach((section) => $('#section-select').add(new Option(`${section.name} · ${section.chunk_count} 段`, section.name)));
+    }
     const data = await api(`/api/books/${bookId}/conversations`);
     state.conversations = data.conversations;
-    renderConversations();
     if (data.conversations.length && state.book.status === 'ready') {
       const history = await api(`/api/books/${bookId}/conversations/${data.conversations[0].id}`);
       state.conversation = history.conversation;
       state.messages = history.messages;
       state.context = history.context || null;
-      renderConversations();
     }
   } finally {
     if (epoch === state.epoch) {
@@ -333,16 +375,9 @@ async function selectBook(bookId, showPanel = true, openReader = false) {
       schedulePoll();
       // A shelf click drops the reader straight into the book's full text;
       // background re-selects (poll, upload, reindex) keep the study panel.
-      if (openReader && state.book?.status === 'ready') await readerUI.open(state.book.id);
+      if (openReader && state.book?.status === 'ready' && state.book?.category !== 'group') await readerUI.open(state.book.id);
     }
   }
-}
-
-function renderConversations() {
-  const select = $('#conversation-select');
-  select.replaceChildren(new Option('新的学习对话', ''));
-  state.conversations.forEach((conversation) => select.add(new Option(conversation.title, conversation.id)));
-  select.value = state.conversation?.id || '';
 }
 
 async function selectConversation(conversationId) {
@@ -368,7 +403,6 @@ async function selectConversation(conversationId) {
   } finally {
     if (epoch === state.epoch) {
       state.loading = false;
-      renderConversations();
       renderMessages();
       updateComposer();
       schedulePoll();
@@ -429,17 +463,26 @@ function updateComposer() {
 
 function renderBook() {
   const book = state.book;
+  const isGroup = book?.category === 'group';
   $('#current-title').textContent = book?.title || '从一本教材开始';
-  $('#current-meta').textContent = book ? (book.status === 'ready'
-    ? `${book.section_count} 个章节 · ${book.chunk_count} 段原文 · ${book.index_backend.startsWith('vector') ? '语义 + 关键词混合检索' : '关键词检索（未启用语义向量）'}`
-    : `${statusNames[book.status] || book.status} · 大部头教材首次索引需要一些时间`) : '上传已完成 OCR 的 Markdown，或选择书架中的教材。';
-  $('#book-actions').hidden = !book;
-  $('#read-book').hidden = !book || book.status !== 'ready';
-  $('#book-notes').hidden = !book || book.status !== 'ready';
+  if (isGroup) {
+    const members = book.members || [];
+    $('#current-meta').textContent = `文献组 · ${members.length} 篇论文 · 跨文献联合检索`;
+  } else {
+    $('#current-meta').textContent = book ? (book.status === 'ready'
+      ? `${book.section_count} 个章节 · ${book.chunk_count} 段原文 · ${book.index_backend.startsWith('vector') ? '语义 + 关键词混合检索' : '关键词检索（未启用语义向量）'}`
+      : `${statusNames[book.status] || book.status} · 大部头教材首次索引需要一些时间`) : '上传已完成 OCR 的 Markdown，或选择书架中的教材。';
+  }
+  $('#book-actions').hidden = !book || isGroup;
+  $('#read-book').hidden = !book || book.status !== 'ready' || isGroup;
+  $('#book-notes').hidden = !book || book.status !== 'ready' || isGroup;
+  // Groups search every member paper: the chapter scope carries no
+  // information there, so the control collapses to the conversation buttons.
+  $('#section-select').closest('.select-field').hidden = Boolean(isGroup);
   $('#study-controls').hidden = !book || book.status !== 'ready';
   $('#book-error').hidden = !book?.error;
   $('#book-error').textContent = book?.error || '';
-  $('#reindex').hidden = !book || Boolean(book.builtin);
+  $('#reindex').hidden = !book || Boolean(book.builtin) || isGroup;
   $('#reindex').disabled = !book || ['queued', 'indexing'].includes(book.status) || state.pending;
   renderMessages();
   updateComposer();
@@ -464,7 +507,8 @@ function renderEmpty() {
     container.append(element('h2', '', state.loading ? '正在打开这本书…' : state.book.status === 'error' ? '这本书还没准备好。' : '正在为教材建立索引。'),
       element('p', '', state.book.status === 'error' ? '查看上方失败原因。修正文件后重新上传，或点击“重新索引”重试。' : '索引完成后，就可以开始提问。你可以留在此页，也可以稍后再回来。'));
   } else {
-    container.append(element('h2', '', '从一个不太确定的地方问起。'), element('p', '', '选择章节会缩小检索范围。没有指定问题的讲解与自测，只抽取部分原文，不代表覆盖整本教材。'));
+    const isGroup = state.book.category === 'group';
+    container.append(element('h2', '', '从一个不太确定的地方问起。'), element('p', '', isGroup ? '提问会在组内全部论文中联合检索；引用标记注明来源论文，点击可跳转到对应原文。' : '选择章节会缩小检索范围。没有指定问题的讲解与自测，只抽取部分原文，不代表覆盖整本教材。'));
     const suggestions = element('div', 'suggestions');
     const items = [
       ['解释一个概念', 'qa', '请解释：'], ['梳理当前范围的要点', 'outline', '梳理本章'],
@@ -476,10 +520,12 @@ function renderEmpty() {
       button.addEventListener('click', () => { setMode(mode); $('#question').value = prompt; $('#question').focus(); });
       suggestions.append(button);
     });
-    const readButton = element('button', 'suggestion', '不提问，直接通读原文');
-    readButton.append(element('span', '', '阅读全文 →'));
-    readButton.addEventListener('click', () => readerUI.open(state.book.id, { expanded: true }));
-    suggestions.append(readButton);
+    if (!isGroup) {
+      const readButton = element('button', 'suggestion', '不提问，直接通读原文');
+      readButton.append(element('span', '', '阅读全文 →'));
+      readButton.addEventListener('click', () => readerUI.open(state.book.id, { expanded: true }));
+      suggestions.append(readButton);
+    }
     container.append(suggestions);
   }
   return container;
@@ -514,8 +560,10 @@ function citationButton(label, references, message) {
     return button;
   }
   const button = element('button', 'citation', `[${label}]`);
-  button.title = `${reference.section} · 段落 ${reference.ordinal}`;
-  const bookId = state.book.id;
+  button.title = reference.book_title
+    ? `${reference.book_title} · ${reference.section} · 段落 ${reference.ordinal}`
+    : `${reference.section} · 段落 ${reference.ordinal}`;
+  const bookId = reference.book_id || state.book.id;
   action(button, 'click', () => showEvidence(bookId, reference, message));
   return button;
 }
@@ -798,14 +846,42 @@ const readerUI = createReader({
   getEpoch: () => state.epoch,
 });
 
-function showEvidence(bookId, reference) {
+async function showEvidence(bookId, reference) {
+  // Group answers cite member papers, but the reader only opens the currently
+  // selected book: hop the shelf to the citation's owner before anchoring.
+  if (bookId !== state.book?.id) {
+    try {
+      await selectBook(bookId, false);
+    } catch (error) {
+      toast(error.message || '无法打开引用所在文献。');
+      return;
+    }
+  }
   return readerUI.open(bookId, { anchor: reference.chunk_id });
 }
 
 function openUpload() {
   $('#upload-error').textContent = '';
+  // Preselect the category radio to match the active library tab.
+  const radio = $(`#upload-form input[name="category"][value="${state.category}"]`);
+  if (radio) radio.checked = true;
   $('#upload-dialog').showModal();
 }
+
+function setCategory(category) {
+  state.category = category;
+  document.querySelectorAll('.library-tab').forEach((tab) => {
+    const active = tab.dataset.category === category;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  });
+  $('#group-bar').hidden = category !== 'literature';
+  renderLibrary();
+}
+
+document.querySelectorAll('.library-tab').forEach((tab) => {
+  tab.addEventListener('click', () => setCategory(tab.dataset.category));
+});
 
 $('#auth-toggle').addEventListener('click', () => { state.registering = !state.registering; setAuthMode(); });
 $('#auth-form').addEventListener('submit', async (event) => {
@@ -861,9 +937,12 @@ $('#upload-form').addEventListener('submit', async (event) => {
     const data = await api('/api/books', { method: 'POST', body: new FormData($('#upload-form')) });
     $('#upload-dialog').close();
     $('#upload-form').reset();
+    // Switch to the uploaded book's category tab so it's immediately visible.
+    const uploaded = data.book.category || 'textbook';
+    if (uploaded !== state.category) setCategory(uploaded);
     await refreshBooks();
     await selectBook(data.book.id);
-    toast('教材已上传，正在后台建立索引。');
+    toast(uploaded === 'literature' ? '文献已上传，正在后台建立索引。' : '教材已上传，正在后台建立索引。');
   } catch (error) {
     if (epoch === state.epoch && error.name !== 'AbortError') $('#upload-error').textContent = error.message;
   } finally {
@@ -873,6 +952,85 @@ $('#upload-form').addEventListener('submit', async (event) => {
   }
 });
 $('#upload-dialog').addEventListener('cancel', (event) => { if ($('#upload-submit').disabled) event.preventDefault(); });
+
+// ------------------------------------------------------------------
+// Literature group dialog
+// ------------------------------------------------------------------
+
+function openGroupDialog(group = null) {
+  state.editingGroup = group;
+  $('#group-dialog-title').textContent = group ? '编辑文献组' : '新建文献组';
+  $('#group-submit').textContent = group ? '保存' : '创建';
+  $('#group-delete').hidden = !group;
+  $('#group-error').textContent = '';
+  $('#group-name').value = group ? group.title : '';
+  // Build checkbox list of ready literature
+  const list = $('#group-book-list');
+  list.replaceChildren();
+  const literature = state.books.filter((b) => b.category === 'literature' && b.status === 'ready');
+  if (!literature.length) {
+    list.append(element('p', 'muted', '没有已完成索引的文献，请先上传文献。'));
+  } else {
+    const memberIds = new Set((group?.members || []).map((m) => m.id));
+    literature.forEach((book) => {
+      const label = element('label', 'group-book-option');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = book.id;
+      checkbox.checked = memberIds.has(book.id);
+      label.append(checkbox, element('span', '', book.title));
+      list.append(label);
+    });
+  }
+  $('#group-dialog').showModal();
+}
+
+$('#create-group-open').addEventListener('click', () => openGroupDialog());
+$('#group-close').addEventListener('click', () => $('#group-dialog').close());
+$('#group-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const name = $('#group-name').value.trim();
+  const checked = [...$('#group-book-list').querySelectorAll('input:checked')].map((el) => el.value);
+  if (!name) { $('#group-error').textContent = '请输入组名。'; return; }
+  if (checked.length < 2) { $('#group-error').textContent = '至少选择 2 篇文献。'; return; }
+  if (checked.length > 20) { $('#group-error').textContent = '最多选择 20 篇文献。'; return; }
+  $('#group-submit').disabled = true;
+  $('#group-error').textContent = '';
+  try {
+    if (state.editingGroup) {
+      await api(`/api/groups/${state.editingGroup.id}`, { method: 'PATCH', body: { name, book_ids: checked } });
+      toast('文献组已更新。');
+    } else {
+      await api('/api/groups', { method: 'POST', body: { name, book_ids: checked } });
+      toast('文献组已创建。');
+    }
+    $('#group-dialog').close();
+    await refreshBooks();
+  } catch (error) {
+    $('#group-error').textContent = error.message;
+  } finally {
+    $('#group-submit').disabled = false;
+  }
+});
+$('#group-delete').addEventListener('click', async () => {
+  if (!state.editingGroup) return;
+  if (!confirm(`删除文献组「${state.editingGroup.title}」？组内对话将一并清除。`)) return;
+  try {
+    await api(`/api/groups/${state.editingGroup.id}`, { method: 'DELETE' });
+    $('#group-dialog').close();
+    if (state.book?.id === state.editingGroup.id) {
+      invalidate();
+      state.book = null;
+      state.messages = [];
+      renderBook();
+    }
+    await refreshBooks();
+    toast('文献组已删除。');
+  } catch (error) {
+    $('#group-error').textContent = error.message;
+  }
+});
+$('#group-dialog').addEventListener('cancel', (event) => { if ($('#group-submit').disabled) event.preventDefault(); });
 action($('#reindex'), 'click', async () => {
   if (!state.book || !confirm('重新索引会清除这本书的全部学习对话，以免旧引用指向新的分块。确定继续？')) return;
   const bookId = state.book.id;
@@ -881,7 +1039,6 @@ action($('#reindex'), 'click', async () => {
   await selectBook(bookId);
   toast('已重新加入索引队列。');
 });
-action($('#conversation-select'), 'change', () => selectConversation($('#conversation-select').value));
 action($('#read-book'), 'click', () => state.book && readerUI.open(state.book.id, { expanded: true }));
 action($('#book-notes'), 'click', () => state.book && readerUI.open(state.book.id, { notes: true }));
 action($('#new-conversation'), 'click', () => selectConversation(''));
@@ -919,7 +1076,6 @@ $('#chat-form').addEventListener('submit', async (event) => {
       const data = await api(`/api/books/${bookId}/conversations`, { method: 'POST', body: {} });
       state.conversation = data.conversation;
       state.conversations.unshift(data.conversation);
-      renderConversations();
     }
     const cid = state.conversation.id;
     await streamChat(`/api/books/${bookId}/conversations/${cid}/messages`,
@@ -969,7 +1125,6 @@ $('#chat-form').addEventListener('submit', async (event) => {
     });
     const conversations = await api(`/api/books/${bookId}/conversations`);
     state.conversations = conversations.conversations;
-    renderConversations();
   } catch (error) {
     const index = state.messages.indexOf(optimistic);
     if (index >= 0) state.messages.splice(index, 1);
