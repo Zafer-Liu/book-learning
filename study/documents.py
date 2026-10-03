@@ -20,6 +20,35 @@ def _squeeze(text):
     return re.sub(rf"(?<=[{_CJK}]) +(?=[{_CJK}])", "", text)
 
 
+# OCR noise: CJK characters separated by single spaces ("诉 讼 行 为"),
+# including the full-width spacing variant. Applied to headings AND body
+# text that came from OCR exports.
+_SPACED_CJK = re.compile(rf"(?<=[{_CJK}]) (?=[{_CJK}])")
+
+
+def _dehyphenate(lines):
+    """Merge hard-wrapped paragraphs: a line that ends mid-clause joins the
+    next line unless a blank line, heading or block marker separates them."""
+    merged = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            merged.append("")
+            continue
+        if merged and merged[-1]:
+            previous = merged[-1]
+            # Previous line continues mid-sentence (no closing punctuation),
+            # and this line is not a heading/list/fence start.
+            continues = (not re.search(r"[。！？：；」”』)]\s*$", previous)
+                         and not re.match(r"[#>*|\-`~\d]", stripped)
+                         and len(previous) < 400)
+            if continues:
+                merged[-1] = previous + stripped
+                continue
+        merged.append(line)
+    return merged
+
+
 def _docx_paragraph_text(node):
     parts = []
     for child in node.iter():
@@ -35,6 +64,7 @@ def _docx_paragraph_text(node):
 # Heading heuristics cover styled Word documents and OCR exports where every
 # paragraph shares one style. Page-numbered running headers stay plain text.
 def _docx_heading_level(text, style_name, outline):
+    text = _SPACED_CJK.sub("", text)
     if style_name:
         match = re.match(r"heading\s*(\d)", style_name, re.I)
         if match:
@@ -143,14 +173,34 @@ def parse_document(path: Path, filename: str) -> list[dict]:
             sections.append({"text": body, "section": label, "page": None})
         buffer.clear()
 
+    # Titles repeat as the first body line of their own section; a title-only
+    # section (heading followed directly by another heading) is merged into
+    # the next one instead of becoming an empty retrieval fragment.
+    def flush_with_pending(pending_title):
+        body = "\n".join(buffer).strip()
+        if body:
+            sections.append({"text": body, "section": label, "page": None})
+            buffer.clear()
+        elif pending_title is not None and buffer:
+            buffer.clear()
+
     while index < len(lines):
         line = lines[index]
-        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
-        if marker:
-            token = marker.group(1)
-            if fence is None:
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker and not fence:
+            token, rest = marker.group(1), marker.group(2).strip()
+            # Self-closing fence on one line ("```markdown ```") — an OCR
+            # artifact around exercise boxes — must not swallow the rest of
+            # the book as code.
+            self_closing = token[0] == "`" and token in rest
+            if not self_closing:
                 fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
+            buffer.append(line)
+            index += 1
+            continue
+        if marker and fence:
+            token = marker.group(1)
+            if token[0] == fence[0] and len(token) >= len(fence):
                 fence = None
             buffer.append(line)
             index += 1
@@ -158,12 +208,12 @@ def parse_document(path: Path, filename: str) -> list[dict]:
         heading = None if fence else re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
         level, title, skip = 0, "", 1
         if heading:
-            level, title = len(heading.group(1)), heading.group(2)
+            level, title = len(heading.group(1)), _SPACED_CJK.sub("", heading.group(2))
         elif not fence and line.strip() and index + 1 < len(lines):
             underline = re.match(r"^\s{0,3}(={3,}|-{3,})\s*$", lines[index + 1])
             if underline:
                 level = 1 if underline.group(1)[0] == "=" else 2
-                title, skip = line.strip(), 2
+                title, skip = _SPACED_CJK.sub("", line.strip()), 2
         if level:
             flush()
             while headings and headings[-1][0] >= level:
@@ -175,7 +225,22 @@ def parse_document(path: Path, filename: str) -> list[dict]:
             buffer.append(line)
         index += skip
     flush()
-    return sections
+    # Merge title-only sections into their successor: the heading text is
+    # already repeated as the section's first line, so a bare-title section
+    # carries no evidence and only pollutes the chapter picker.
+    merged = []
+    for section in sections:
+        body = section["text"].strip()
+        if merged and len(re.sub(r"\s", "", body)) <= 20 and body == merged[-1]["section"].split(" / ")[-1]:
+            merged[-1]["text"] = (body + "\n\n" + merged[-1]["text"].strip()).strip()
+            merged[-1]["section"] = merged[-1]["section"].rsplit(" / ", 1)[0] or merged[-1]["section"]
+            continue
+        if merged and len(re.sub(r"\s", "", body)) <= 20 and body in merged[-1]["text"][:len(body) + 4]:
+            # A tiny lead-in identical to the previous section's heading tail.
+            merged[-1]["text"] = merged[-1]["text"]
+            continue
+        merged.append(section)
+    return merged
 
 
 def split_sections(sections: list[dict], max_chars=1200, overlap=160, include_offsets=False) -> list[dict]:
@@ -184,13 +249,26 @@ def split_sections(sections: list[dict], max_chars=1200, overlap=160, include_of
         raise ValueError("Invalid chunk overlap")
     chunks = []
     source_offset = 0
+    # Prefer sentence-final boundaries (。！？etc.) over paragraph breaks at
+    # arbitrary positions: chunks ending mid-clause read broken in citations.
+    SENTENCE_END = re.compile(r"[。！？；」”](?=[" + r"\s" + r"]|$)")
+
     for section in sections:
-        text = section["text"].strip()
+        text = _SPACED_CJK.sub("", section["text"].strip())
         start = 0
         while start < len(text):
             end = min(start + max_chars, len(text))
             if end < len(text):
+                # First try a paragraph boundary, then the latest sentence end
+                # past the midpoint; both keep chunks readable.
                 boundary = text.rfind("\n\n", start + max_chars // 2, end)
+                if boundary < 0:
+                    window = text[start + max_chars // 2:end + 40]
+                    best = None
+                    for match in SENTENCE_END.finditer(window):
+                        best = match
+                    if best and start + max_chars // 2 + best.start() + 1 > start + max_chars // 2:
+                        boundary = start + max_chars // 2 + best.start() + 1
                 if boundary >= 0:
                     end = boundary
             raw = text[start:end]

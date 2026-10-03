@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -56,6 +57,44 @@ class DocumentTests(unittest.TestCase):
             self.assertNotIn("frontmatter", "".join(s["text"] for s in sections))
             self.assertNotIn("page.png", "".join(s["text"] for s in sections))
             self.assertIn("# Not a heading", sections[1]["text"])
+
+    def test_self_closing_fence_does_not_swallow_the_book(self):
+        # OCR exports wrap exercise boxes in same-line fences; the fence state
+        # machine must treat "```lang ```" as both open and close.
+        source = ("# 第一章 导论\\n\\n正文开始。\\n\\n```markdown ```\\n\\n"
+                  "# 第二章 制度\\n\\n" + "这一章的正文。" * 200 + "\\n\\n```\\n\\n尾注。")
+        # (the trailing ``` closes nothing — no fence was opened)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text(source.replace("\\\\n", "\n"), encoding="utf-8")
+            sections = parse_document(path, "book.md")
+        names = [section["section"] for section in sections]
+        self.assertTrue(any("第二章" in name for name in names),
+                        f"second chapter missing from {names}")
+        self.assertFalse(any(len(section["text"]) > 20000 for section in sections))
+
+    def test_spaced_ocr_headings_and_labels_are_normalized(self):
+        source = "# 上 编 通 则\\n\\n# 第 一 章 诉 讼 行 为\\n\\n正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。正文一段。"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text(source.replace("\\\\n", "\n"), encoding="utf-8")
+            sections = parse_document(path, "book.md")
+        labels = [section["section"] for section in sections]
+        self.assertTrue(any("上编通则" in label for label in labels), labels)
+        self.assertTrue(any("第一章诉讼行为" in label for label in labels), labels)
+
+    def test_title_only_section_merges_into_successor(self):
+        body = "民法调整平等主体之间的财产关系与人身关系。"
+        source = "# 第一编 总论\\n\\n# 第一章 民法概述\\n\\n" + body * 8
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text(source.replace("\\\\n", "\n"), encoding="utf-8")
+            sections = parse_document(path, "book.md")
+        # The bare "第一编 总论" section is folded away, not left as a
+        # title-only retrieval fragment.
+        bodies = [re.sub(r"\s", "", section["text"]) for section in sections]
+        self.assertTrue(all(len(body) > 20 for body in bodies), bodies)
+        self.assertTrue(any("民法调整平等主体" in body for body in bodies))
 
     def test_image_only_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
