@@ -234,6 +234,19 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     reader.after = button('加载后文', () => extend(reader, 'after'), 'reader-more');
     reader.stream = element('div', 'reader-stream');
     reader.scroll.append(reader.before, reader.stream, reader.after);
+    // Track pointer state on the whole document: the drag may leave the
+    // scroll box, and touch selection also fires pointerup when lifted.
+    const onPointerDown = () => { pointerDown = true; hidePopover(); };
+    const onPointerUp = () => {
+      pointerDown = false;
+      // Arm the toolbar; captureSelection (which follows on selectionchange)
+      // shows it when the selection is intact.
+      popoverArmed = true;
+      if (current && live(current) && current.selection) showPopover(current, current.selection);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('pointerup', onPointerUp, true);
+    document.addEventListener('pointercancel', () => { pointerDown = false; });
     reader.progress = element('p', 'reader-progress', '正在读取正文…');
     reader.scroll.addEventListener('scroll', () => {
       hidePopover();
@@ -569,13 +582,14 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
 
   // Floating selection toolbar: appears next to the mouse-up point and offers
   // annotate / ask without reaching for the top buttons (which stay as the
-  // accessible fallback).
+  // accessible fallback). It may only appear while the pointer is up: mid-drag
+  // selectionchange events never surface it, so long drags stay uninterrupted.
   let popover = null;
-  let popoverTimer = null;
+  let pointerDown = false;
+  let popoverArmed = false;
 
   function hidePopover() {
-    clearTimeout(popoverTimer);
-    popoverTimer = null;
+    popoverArmed = false;
     if (popover) popover.remove();
     popover = null;
   }
@@ -599,12 +613,16 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     document.body.append(popover);
     // Place it above the selection end, flipping below when near the top.
     const box = popover.getBoundingClientRect();
-    const anchor = window.getSelection().getRangeAt(0).getBoundingClientRect();
-    const left = Math.min(Math.max(8, anchor.left + anchor.width / 2 - box.width / 2),
+    const range = window.getSelection().getRangeAt(0);
+    const anchor = range.getBoundingClientRect();
+    // Collapsed rects (empty ranges) fall back to the focus point's parent.
+    const spot = anchor.width || anchor.height ? anchor
+      : (range.startContainer.parentElement?.getBoundingClientRect() || anchor);
+    const left = Math.min(Math.max(8, spot.left + spot.width / 2 - box.width / 2),
                           window.innerWidth - box.width - 8);
-    const above = anchor.top > box.height + 12;
+    const above = spot.top > box.height + 12;
     popover.style.left = `${Math.round(left)}px`;
-    popover.style.top = `${Math.round(above ? anchor.top - box.height - 8 : anchor.bottom + 8)}px`;
+    popover.style.top = `${Math.round(above ? spot.top - box.height - 8 : spot.bottom + 8)}px`;
     popover.classList.toggle('below', !above);
     highlight.focus({ preventScroll: true });
   }
@@ -616,8 +634,13 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
       return;
     }
     reader.selection = null;
-    hidePopover();
     const selection = window.getSelection();
+    // A fresh drag clears the popover immediately; the toolbar is re-armed on
+    // pointerup (below), so mid-drag events can never surface it early.
+    if (pointerDown) hidePopover();
+    // Touch handles (iOS/Android drag knobs) mutate an existing selection
+    // without pointer events: a popover pointing at a stale selection closes.
+    if (popover && (!selection || selection.isCollapsed || selection.rangeCount !== 1)) hidePopover();
     if (selection && !selection.isCollapsed && selection.rangeCount === 1) {
       const range = selection.getRangeAt(0);
       const start = endpoint(range.startContainer, range.startOffset, reader);
@@ -627,15 +650,9 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
           .map((block) => block.text.slice(Math.max(0, start - block.start), Math.min(block.text.length, end - block.start))).join('');
         if (quote.length === end - start && quote.trim()) {
           reader.selection = { version: reader.version, start, end, quote };
-          // selectionchange also fires mid-drag; only surface the popover on
-          // a settled (non-collapsed) selection a beat after the drag ends.
-          if (!popoverTimer) {
-            popoverTimer = setTimeout(() => {
-              popoverTimer = null;
-              const settled = window.getSelection();
-              if (reader.selection && settled && !settled.isCollapsed && live(reader)) showPopover(reader, reader.selection);
-            }, 120);
-          }
+          // Surface the toolbar only when the pointer is already up (keyboard
+          // selection or a just-finished drag whose pointerup came first).
+          if (popoverArmed && !pointerDown) showPopover(reader, reader.selection);
         }
       }
       if (start !== null && end !== null && end - start > 4000) reader.hint.textContent = '一次最多选择 4000 个字符，请缩小选文范围。';

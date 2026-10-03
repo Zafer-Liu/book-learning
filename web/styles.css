@@ -487,6 +487,30 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
   .reading-focused .reader-tools { max-height: 110px; overflow-y: auto; }
 }
 
+/* Touch and small-screen refinements: bigger tap targets, no hover-only
+   affordances, and a popover that never covers the selection. */
+@media (hover: none), (max-width: 600px) {
+  .reader-actions button, .reader-more, .feedback-button, .feedback-reason { min-height: 36px; }
+  .reader-popover { padding: 6px 9px; gap: 2px; }
+  .reader-popover button { padding: 10px 14px; font-size: 13px; }
+  /* iOS Safari: a long-press selection should not trigger the callout menu
+     over the popover, and text must stay selectable without zoom panning. */
+  .reader-text { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+  .reader-scroll { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .reader-popover { max-width: calc(100vw - 16px); }
+}
+@media (max-width: 600px) {
+  .demo-box { padding: 12px; }
+  .demo-messages { max-height: 240px; }
+  .share-card { padding: 20px 16px; }
+  .share-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  /* The floating chat window takes most of the phone screen while reading. */
+  .desk.reading-focused > .study { left: 8px; right: 8px; width: auto; height: 62%; }
+  .reader-chat-launcher { padding: 15px 26px; }
+  /* Selection toolbar buttons stay reachable above the composer. */
+  .reading-focused .reader-chat-bar { top: 0; }
+}
+
 /* Private annotation dialog. */
 .annotation-dialog { max-width: 520px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 14px; padding: 27px; box-shadow: 0 30px 100px #172b4d25; color: var(--ink); }
 .annotation-dialog::backdrop { background: #172b4d60; backdrop-filter: blur(3px); }
