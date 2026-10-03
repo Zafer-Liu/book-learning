@@ -92,6 +92,12 @@ CREATE TABLE IF NOT EXISTS app_logs (
 );
 CREATE INDEX IF NOT EXISTS app_logs_scope ON app_logs(owner_id, id);
 CREATE INDEX IF NOT EXISTS app_logs_age ON app_logs(created_at);
+CREATE TABLE IF NOT EXISTS shares (
+    token TEXT PRIMARY KEY, owner_id TEXT NOT NULL, book_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL, message_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL, revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS shares_message ON shares(message_id);
 """
 
 

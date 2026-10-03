@@ -28,6 +28,14 @@
         <button id="auth-submit" class="primary" type="submit">登录</button>
         <button id="auth-toggle" class="text-button" type="button" hidden>还没有账户？创建书架</button>
         <p class="auth-note">教材存储在服务端，按账户隔离。提问时，相关原文片段会发送给部署者配置的模型服务；配置向量服务后，索引时也会发送教材分块。当前不提供邮件验证和自助密码找回，请妥善保管密码。</p>
+        <button id="demo-toggle" type="button" class="text-button demo-toggle">还没账户？先在线体验内置教材 →</button>
+        <section id="demo-box" class="demo-box" hidden>
+          <h3>在线体验</h3>
+          <p class="muted">选一本内置教材提问，回答同样带教材引用。体验通道每 IP 每小时 6 问，对话不保存。</p>
+          <label class="select-field demo-book-field">体验教材<select id="demo-book"><option value="">正在读取内置教材…</option></select></label>
+          <div id="demo-messages" class="demo-messages" aria-live="polite"></div>
+          <form id="demo-form" class="demo-form"><label class="sr-only" for="demo-question">体验问题</label><textarea id="demo-question" rows="2" maxlength="1000" placeholder="例如：民法总则中法人分为哪几类？"></textarea><button type="submit" class="send-button" id="demo-send">提问</button></form>
+        </section>
       </form>
     </div>
   </section>
@@ -56,7 +64,7 @@
         </div>
         <div class="study-heading">
           <div><h1 id="current-title">从一本教材开始</h1><p id="current-meta">上传已完成 OCR 的 Markdown，或选择书架中的教材。</p></div>
-          <div id="book-actions" class="book-actions" hidden><button id="read-book" class="outline-button">阅读全文</button><button id="book-notes" class="text-button">我的批注</button><button id="reindex" class="text-button">重新索引</button></div>
+          <div id="book-actions" class="book-actions" hidden><button id="read-book" class="outline-button">阅读全文</button><button id="book-notes" class="text-button">我的批注</button><button id="export-cards" class="text-button" title="把本书全部自测题导出为 Anki 兼容的 CSV 学习卡片">导出卡片</button><button id="reindex" class="text-button">重新索引</button></div>
         </div>
         <div id="config-warning" class="notice warning" hidden></div>
         <div id="book-error" class="notice warning" hidden></div>
@@ -67,8 +75,10 @@
         </div>
         <div id="messages" class="messages" aria-live="polite" aria-busy="false"></div>
         <div class="composer-wrap">
-          <div class="modes" role="group" aria-label="学习模式"><button data-mode="qa" aria-pressed="true">教材问答</button><button data-mode="explain" aria-pressed="false">章节讲解</button><button data-mode="outline" aria-pressed="false">要点梳理</button><button data-mode="quiz" aria-pressed="false">自测练习</button><label id="web-toggle-label" class="web-toggle" hidden title="回答仍以当前教材为主，仅在教材覆盖不到时联网补充，网络来源以 W 标注"><input type="checkbox" id="web-search-toggle">联网补充</label></div>
-          <form id="chat-form" class="composer"><label class="sr-only" for="question">你的学习问题</label><textarea id="question" rows="2" maxlength="3000" placeholder="这本书里的哪个概念，让你停下来想了想？" disabled></textarea><div class="composer-bottom"><span id="scope-label">先选择一本完成索引的教材</span><div><span id="context-meter" class="context-meter" hidden title="当前对话未压缩的上下文体量；达到阈值后自动把较早问答压缩成摘要，计数随之回落"><span class="context-bar" aria-hidden="true"><span class="context-fill"></span></span><span class="context-text"></span></span><button id="cancel-send" type="button" class="text-button" hidden>停止等待</button><button id="send" type="submit" class="send-button" disabled>提问 <span aria-hidden="true">↗</span></button></div></div></form>
+          <div class="modes" role="group" aria-label="学习模式"><button type="button" data-mode="qa" aria-pressed="true">教材问答</button><button type="button" data-mode="explain" aria-pressed="false">章节讲解</button><button type="button" data-mode="outline" aria-pressed="false">要点梳理</button><button type="button" data-mode="quiz" aria-pressed="false">自测练习</button><label id="web-toggle-label" class="web-toggle" hidden title="回答仍以当前教材为主，仅在教材覆盖不到时联网补充，网络来源以 W 标注"><input type="checkbox" id="web-search-toggle">联网补充</label><label id="quiz-count-field" class="web-toggle" hidden title="自测练习的出题数量">数量<select id="quiz-count"><option value="3" selected>3 题</option><option value="5">5 题</option><option value="10">10 题</option></select></label><label id="quiz-level-field" class="web-toggle" hidden title="自测练习的难度取向">难度<select id="quiz-level"><option value="standard" selected>基础</option><option value="deep">进阶</option></select></label></div>
+          <div id="selection-chip" class="selection-chip" hidden><span id="selection-chip-text"></span><button id="selection-chip-remove" type="button" class="text-button" title="移除选文上下文">×</button></div>
+          <div class="mode-guide" aria-live="polite"><strong id="mode-title">教材问答</strong><span id="mode-description">输入问题，检索教材并给出带原文引用的回答。</span><small id="mode-scope-hint">可先选择章节，缩小查找范围。</small></div>
+          <form id="chat-form" class="composer"><label class="sr-only" for="question">你的学习问题或主题</label><textarea id="question" rows="2" maxlength="3000" aria-describedby="mode-description mode-scope-hint" placeholder="输入概念或具体问题，例如：这两个概念有什么区别？" disabled></textarea><div class="composer-bottom"><span id="scope-label">先选择一本完成索引的教材</span><div><span id="context-meter" class="context-meter" hidden title="当前对话未压缩的上下文体量；达到阈值后自动把较早问答压缩成摘要，计数随之回落"><span class="context-bar" aria-hidden="true"><span class="context-fill"></span></span><span class="context-text"></span></span><button id="cancel-send" type="button" class="text-button" hidden>停止等待</button><button id="send" type="submit" class="send-button" disabled>提问 <span aria-hidden="true">↗</span></button></div></div></form>
           <p class="composer-note" id="composer-note">仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见</p>
         </div>
       </section>

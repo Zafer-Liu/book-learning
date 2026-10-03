@@ -37,6 +37,14 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 LOG = logging.getLogger(__name__)
 
+# Exact UI commands describe a scope task, not textbook search terms. The first
+# entry is the canonical instruction used for generation and conversation history.
+SCOPE_COMMANDS = {
+    "explain": ("讲解当前范围", "开始讲解", "章节讲解"),
+    "outline": ("梳理当前范围的要点", "生成要点", "要点梳理"),
+    "quiz": ("针对当前范围出三道自测题", "生成自测", "自测练习"),
+}
+
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -231,6 +239,10 @@ def create_app(test_config=None):
             if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
                 abort(404, description="不存在。")
             return None
+        # Public surfaces: the guest demo (builtin books, IP-throttled) and
+        # one-off share links carry no account session.
+        if request.path.startswith("/api/demo/") or request.path.startswith("/api/share/"):
+            return None
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             expected, actual = session.get("csrf", ""), request.headers.get("X-CSRF-Token", "")
             if not expected or not hmac.compare_digest(expected.encode(), actual.encode()):
@@ -281,7 +293,7 @@ def create_app(test_config=None):
 
     @app.get("/assets/<path:name>")
     def assets(name):
-        if name not in {"app.js", "reader.js", "styles.css", "mermaid.min.js"}:
+        if name not in {"app.js", "reader.js", "styles.css", "mermaid.min.js", "share.html"}:
             abort(404)
         response = send_from_directory(ROOT / "web", name)
         response.headers["Cache-Control"] = "no-cache"
@@ -410,6 +422,192 @@ def create_app(test_config=None):
                  for row in rows]
         bound = sum(1 for item in codes if item["bound"])
         return jsonify(total=len(codes), bound=bound, open=len(codes) - bound, codes=codes)
+
+    # ------------------------------------------------------------------
+    # Learning card export (Anki-compatible CSV) and share links
+    # ------------------------------------------------------------------
+
+    @app.get("/api/books/<book_id>/export/cards.csv")
+    def export_cards(book_id):
+        import csv
+        import io
+        with database.connect() as db:
+            book = book_row(db, book_id)
+            rows = db.execute("SELECT payload FROM messages WHERE owner_id=? AND book_id=? AND role='assistant' "
+                              "ORDER BY created_at, id", (g.user["id"], book_id)).fetchall()
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["正面（问题）", "背面（答案）", "解析", "来源"])
+        cards = 0
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (ValueError, TypeError):
+                continue
+            quiz = payload.get("quiz") if isinstance(payload, dict) else None
+            if not isinstance(quiz, list):
+                continue
+            sections = {}
+            for ref in payload.get("citations") or []:
+                if isinstance(ref, dict) and ref.get("label"):
+                    sections[ref["label"]] = ref.get("section") or ""
+            for item in quiz:
+                if not isinstance(item, dict) or not item.get("question"):
+                    continue
+                cites = "、".join(filter(None, (sections.get(label) for label in (item.get("citations") or []))))
+                writer.writerow([item.get("question", ""), item.get("answer", ""), item.get("explanation", ""),
+                                 book["title"] + (f"（{cites}）" if cites else "")])
+                cards += 1
+        if not cards:
+            abort(404, description="本书还没有可导出的自测题；先用自测练习模式生成题目。")
+        # UTF-8 BOM keeps Excel happy with Chinese text.
+        return Response("\ufeff" + buffer.getvalue(), mimetype="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f"attachment; filename=cards-{book_id[:8]}.csv"})
+
+    @app.post("/api/books/<book_id>/conversations/<conversation_id>/messages/<message_id>/share")
+    def create_share(book_id, conversation_id, message_id):
+        with database.connect() as db:
+            book_row(db, book_id)
+            conversation_row(db, book_id, conversation_id)
+            row = db.execute("SELECT id,role,created_at FROM messages WHERE id=? AND owner_id=? AND book_id=? "
+                             "AND conversation_id=?", (message_id, g.user["id"], book_id, conversation_id)).fetchone()
+            if row is None:
+                abort(404, description="消息不存在或已删除。")
+            if row["role"] != "assistant":
+                abort(400, description="只能分享回答消息。")
+            existing = db.execute("SELECT token FROM shares WHERE message_id=? AND revoked_at IS NULL",
+                                  (message_id,)).fetchone()
+            if existing:
+                return jsonify(url=f"/share/{existing['token']}", revoked=False)
+            token = secrets.token_urlsafe(18)
+            db.execute("INSERT INTO shares(token,owner_id,book_id,conversation_id,message_id,created_at) "
+                       "VALUES(?,?,?,?,?,?)",
+                       (token, g.user["id"], book_id, conversation_id, message_id, now()))
+        add_log("share_created", detail=f"分享了一条回答 · 消息 {message_id[:8]}", owner_id=g.user["id"])
+        return jsonify(url=f"/share/{token}", revoked=False), 201
+
+    @app.delete("/api/books/<book_id>/conversations/<conversation_id>/messages/<message_id>/share")
+    def revoke_share(book_id, conversation_id, message_id):
+        with database.connect() as db:
+            book_row(db, book_id)
+            conversation_row(db, book_id, conversation_id)
+            result = db.execute("UPDATE shares SET revoked_at=COALESCE(revoked_at,?) WHERE message_id=? AND owner_id=?",
+                                (now(), message_id, g.user["id"])).rowcount
+        if not result:
+            abort(404, description="该消息没有生效中的分享链接。")
+        return jsonify(ok=True)
+
+    @app.get("/api/share/<token>")
+    def share_payload(token):
+        # Public, read-only, sanitized view of one shared answer.
+        with database.connect() as db:
+            share = db.execute("SELECT * FROM shares WHERE token=?", (token,)).fetchone()
+            if share is None or share["revoked_at"]:
+                abort(404, description="分享不存在或已撤销。")
+            answer = db.execute("SELECT * FROM messages WHERE id=? AND book_id=? AND conversation_id=?",
+                                (share["message_id"], share["book_id"], share["conversation_id"])).fetchone()
+            if answer is None:
+                abort(404, description="原回答已删除，分享失效。")
+            book = db.execute("SELECT title FROM books WHERE id=?", (share["book_id"],)).fetchone()
+            question = db.execute("SELECT content FROM messages WHERE owner_id=? AND book_id=? AND conversation_id=? "
+                                  "AND role='user' AND created_at<=? ORDER BY created_at DESC, id DESC LIMIT 1",
+                                  (share["owner_id"], share["book_id"], share["conversation_id"],
+                                   answer["created_at"])).fetchone()
+        payload = json.loads(answer["payload"])
+        return jsonify(book_title=book["title"] if book else "",
+                       question=question["content"] if question else "",
+                       message={"paragraphs": payload.get("paragraphs") or [],
+                                "quiz": payload.get("quiz") or [],
+                                "diagrams": payload.get("diagrams") or [],
+                                "citations": [ref for ref in (payload.get("citations") or [])
+                                              if isinstance(ref, dict) and not ref.get("kind") == "web"]})
+
+    @app.get("/share/<token>")
+    def share_page(token):
+        response = send_from_directory(ROOT / "web", "share.html")
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    # ------------------------------------------------------------------
+    # Guest demo: builtin books only, IP-throttled, nothing persisted
+    # ------------------------------------------------------------------
+
+    @app.get("/api/demo/books")
+    def demo_books():
+        with database.connect() as db:
+            rows = db.execute("SELECT id,title,section_count,chunk_count FROM books "
+                              "WHERE owner_id=? AND category='textbook' AND status='ready' ORDER BY title",
+                              (BUILTIN_OWNER,)).fetchall()
+        return jsonify(books=[dict(row) for row in rows])
+
+    @app.post("/api/demo/message")
+    def demo_message():
+        data = body()
+        book_id, question = data.get("book_id"), data.get("message")
+        if not isinstance(book_id, str) or not isinstance(question, str) or not 1 <= len(question.strip()) <= 1000:
+            abort(400, description="请选择内置教材并输入 1–1000 字的问题。")
+        question = question.strip()
+        with database.connect() as db:
+            book = db.execute("SELECT id,title FROM books WHERE id=? AND owner_id=? AND category='textbook' "
+                              "AND status='ready'", (book_id, BUILTIN_OWNER)).fetchone()
+            if book is None:
+                abort(404, description="体验教材不存在或未就绪。")
+        # Throttle only valid-looking asks: 404 probes stay free.
+        throttle(("demo", request.remote_addr), 6, 3600)
+        if not model_slots.acquire(blocking=False):
+            abort(429, description="体验通道繁忙，请稍后再试。")
+        with database.connect() as db:
+            rows = db.execute("SELECT * FROM chunks WHERE owner_id=? AND book_id=? ORDER BY ordinal",
+                              (BUILTIN_OWNER, book_id)).fetchall()
+        chunks = []
+        for row in rows:
+            chunk = dict(row)
+            chunk["embedding"] = json.loads(chunk["embedding"]) if chunk["embedding"] else None
+            chunks.append(chunk)
+
+        def fts_lookup(word_list):
+            if not word_list:
+                return []
+            match = " OR ".join('"' + word.replace('"', '""') + '"' for word in word_list)
+            try:
+                with database.connect() as db:
+                    return [r[0] for r in db.execute(
+                        "SELECT c.id FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid "
+                        "WHERE chunks_fts MATCH ? AND c.owner_id=? AND c.book_id=? "
+                        "ORDER BY bm25(chunks_fts) LIMIT 24", (match, BUILTIN_OWNER, book_id))]
+            except sqlite3.OperationalError:
+                return []
+
+        def run_search(agent_query, limit):
+            word_list = terms(agent_query)
+            return retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit)["hits"]
+
+        def stream():
+            try:
+                yield sse({"type": "status", "stage": "generate", "text": "模型正在检索这本教材…"})
+                try:
+                    for kind, value in tutor.agent_stream(question, "qa", book["title"], run_search, [], {}):
+                        if kind == "delta":
+                            yield sse({"type": "delta", "text": value})
+                        elif kind == "search":
+                            yield sse({"type": "status", "stage": "search", "reset": True,
+                                       "text": search_step_text(value)})
+                        else:
+                            yield sse({"type": "answer", "message": value})
+                except TutorError as exc:
+                    yield sse({"type": "error", "error": str(exc)})
+                except Exception:
+                    # Guest channel: any internal failure becomes a readable
+                    # SSE error instead of a broken stream.
+                    LOG.exception("demo chat failed")
+                    yield sse({"type": "error", "error": "体验通道暂时不可用，请稍后再试。"})
+            finally:
+                model_slots.release()
+
+        add_log("demo_chat", detail=f"游客体验 · 《{book['title'][:30]}》· 问: {question[:40]}")
+        return Response(stream_with_context(stream()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 
     @app.get("/api/admin/overview")
     def admin_overview():
@@ -601,7 +799,18 @@ def create_app(test_config=None):
             sections = db.execute("SELECT section AS name,count(*) AS chunk_count FROM chunks "
                                   "WHERE owner_id IN (?, ?) AND book_id=? GROUP BY section ORDER BY min(ordinal)",
                                   (g.user["id"], BUILTIN_OWNER, book_id)).fetchall()
-        return jsonify(book=public_book(row), sections=[dict(s) for s in sections])
+            # Lightweight study stats for the header line.
+            stats = {
+                "conversations": db.execute("SELECT count(*) FROM conversations WHERE owner_id=? AND book_id=?",
+                                            (g.user["id"], book_id)).fetchone()[0],
+                "questions": db.execute("SELECT count(*) FROM messages WHERE owner_id=? AND book_id=? AND role='user'",
+                                        (g.user["id"], book_id)).fetchone()[0],
+                "annotations": db.execute("SELECT count(*) FROM annotations WHERE owner_id=? AND book_id=?",
+                                          (g.user["id"], book_id)).fetchone()[0],
+                "last_activity": db.execute("SELECT max(created_at) FROM messages WHERE owner_id=? AND book_id=?",
+                                            (g.user["id"], book_id)).fetchone()[0] or "",
+            }
+        return jsonify(book=public_book(row), sections=[dict(s) for s in sections], stats=stats)
 
     @app.delete("/api/books/<book_id>")
     def delete_book(book_id):
@@ -1002,14 +1211,36 @@ def create_app(test_config=None):
     def chat(book_id, conversation_id):
         data = body()
         question, mode, section = data.get("message"), data.get("mode", "qa"), data.get("section")
-        if not isinstance(question, str) or not 1 <= len(question.strip()) <= 3000:
-            abort(400, description="请输入 1–3000 字的问题。")
         if not isinstance(mode, str) or mode not in MODES or (section is not None and not isinstance(section, str)):
             abort(400, description="学习模式或章节参数无效。")
+        section = section or None
+        if not isinstance(question, str) or len(question) > 3000:
+            abort(400, description="message 必须是字符串，且不能超过 3000 字。")
         question = question.strip()
+        if mode == "qa" and not question:
+            abort(400, description="请输入 1–3000 字的问题。")
+        # Empty input and exact action labels mean "use this SQL scope". Match
+        # before tokenization/history so "开始" cannot become a retrieval query.
+        # Never use prefix matching: "开始讲解想象" still has a specific topic.
+        scope_commands = SCOPE_COMMANDS.get(mode, ())
+        command_text = re.sub(r"^(?:请帮我|帮我|请)\s*", "", question).rstrip("。.!！?？").strip()
+        scope_overview = bool(scope_commands) and (not question or command_text in scope_commands)
+        if scope_overview:
+            question = scope_commands[0]
         # Opt-in web supplement: honoured only when the deployment configured
         # the search MCP and the agentic QA path (qa mode) will actually run.
         web_enabled = bool(data.get("web")) and searcher.configured and mode == "qa"
+        # Quiz tuning and the reader selection ride along as trusted defaults.
+        raw_count = data.get("quiz_count", 3)
+        quiz_count = raw_count if isinstance(raw_count, int) and raw_count in (3, 5, 10) else 3
+        quiz_level = data.get("quiz_level") if data.get("quiz_level") in ("standard", "deep") else "standard"
+        selection = data.get("selection")
+        if selection is not None:
+            if not isinstance(selection, dict) \
+                    or not isinstance(selection.get("quote"), str) or not 1 <= len(selection["quote"].strip()) <= 4000 \
+                    or not isinstance(selection.get("section", ""), str) or len(selection.get("section", "")) > 200:
+                abort(400, description="选文上下文无效。")
+            selection = {"quote": selection["quote"].strip(), "section": (selection.get("section") or "").strip()[:200]}
         owner = g.user["id"]
         with database.connect() as db:
             book = book_row(db, book_id)
@@ -1037,7 +1268,6 @@ def create_app(test_config=None):
                 is_group = False
                 member_ids = []
                 book_titles = {}  # book_id -> title for group citation attribution
-                yield sse({"type": "status", "stage": "retrieve", "text": "正在检索本书相关内容…"})
                 with database.connect() as db:
                     book = book_row(db, book_id)
                     conversation = conversation_row(db, book_id, conversation_id)
@@ -1088,9 +1318,13 @@ def create_app(test_config=None):
                         if is_group:
                             chunk["book_title"] = book_titles.get(chunk["book_id"], "")
                         chunks.append(chunk)
-                    previous = [row["content"] for row in reversed(old) if row["role"] == "user"][-3:]
-                    query = question
-                    if re.search(r"继续|上面|刚才|它|这个|这一|再讲|举例", question) and previous:
+                    # A fresh scope task must not inherit the previous topic,
+                    # including any pronoun resolution in the model context.
+                    previous = [] if scope_overview else [
+                        row["content"] for row in reversed(old) if row["role"] == "user"][-3:]
+                    generation_summary = "" if scope_overview else summary
+                    query = "" if scope_overview else question
+                    if not scope_overview and re.search(r"继续|上面|刚才|它|这个|这一|再讲|举例", question) and previous:
                         query = previous[-1][:300] + " " + question
 
                     def fts_lookup(word_list):
@@ -1118,16 +1352,25 @@ def create_app(test_config=None):
                             LOG.warning("FTS query unavailable; using lexical channel")
                             return []
 
-                    search_terms = terms(query)
+                    search_terms = [] if scope_overview else terms(query)
+                # Preserve legacy keyword-free non-QA overviews, but never use
+                # a failed topical retrieval as a reason to sample unrelated text.
+                overview = scope_overview or (mode != "qa" and not search_terms)
+                yield sse({"type": "status", "stage": "retrieve", "text":
+                           "正在按当前范围选取原文片段…" if overview else
+                           "正在检索文献组相关内容…" if is_group else "正在检索本书相关内容…"})
                 streamed, answer = False, None
                 user_key = g.user.get("api_key") or ""
-                hit_count, retrieve_ms, overview = 0, 0, False
+                hit_count, retrieve_ms = 0, 0
                 retrieval = {}
                 try:
                     generate_started = time.monotonic()
-                    if mode == "qa":
-                        # Agentic QA: the model drives retrieval itself through
-                        # the search_book tool; classic retrieval is fallback.
+                    # Concrete explain/outline questions run the agentic loop
+                    # (multi-round retrieval, diagrams); bare scope commands
+                    # keep the deterministic sampling pipeline, quiz stays on
+                    # the classic one-shot path, and classic retrieval remains
+                    # the fallback when the loop fails before streaming.
+                    if not scope_overview and mode != "quiz":
                         agent_state = {"steps": [], "word_set": set(), "backend": "lexical+fts5",
                                        "degraded": True, "ms": 0}
 
@@ -1160,7 +1403,8 @@ def create_app(test_config=None):
                             for kind, value in tutor.agent_stream(question, mode, book["title"], run_agent_search,
                                                                   previous, retrieval, user_key, summary,
                                                                   run_web_search if web_enabled else None,
-                                                                  is_group=is_group):
+                                                                  is_group=is_group, quiz_count=quiz_count,
+                                                                  quiz_level=quiz_level, selection=selection):
                                 if kind == "search":
                                     # Every tool call becomes a visible UI step,
                                     # a dedicated log row and persisted metadata.
@@ -1215,32 +1459,42 @@ def create_app(test_config=None):
                             retrieval.pop("evidence", None)
                     if answer is None:
                         retrieve_started = time.monotonic()
-                        result = retrieve(query, chunks, fts_lookup(search_terms), embedder,
-                                          gate_hook=lambda event, level, detail: add_log(
-                                              event, level=level,
-                                              detail=detail + f" · 问: {question[:40]}", owner_id=owner))
+                        if overview:
+                            # Sampling is its own material-selection path: no FTS,
+                            # query embedding or relevance gate for instruction words.
+                            result = {"hits": [], "backend": "scope-sampling", "degraded": False}
+                            if chunks:
+                                indices = sorted({round(i * (len(chunks) - 1) / min(5, len(chunks) - 1))
+                                                  for i in range(min(6, len(chunks)))}) if len(chunks) > 1 else [0]
+                                result["hits"] = [chunks[index] for index in indices]
+                        else:
+                            result = retrieve(query, chunks, fts_lookup(search_terms), embedder,
+                                              gate_hook=lambda event, level, detail: add_log(
+                                                  event, level=level,
+                                                  detail=detail + f" · 问: {question[:40]}", owner_id=owner))
                         retrieve_ms = int((time.monotonic() - retrieve_started) * 1000)
-                        overview = mode in {"outline", "quiz", "explain"} and not search_terms
-                        if overview and chunks:
-                            # Evenly sampled excerpts are explicit, never called a full-book summary.
-                            indices = sorted({round(i * (len(chunks) - 1) / min(5, len(chunks) - 1))
-                                              for i in range(min(6, len(chunks)))}) if len(chunks) > 1 else [0]
-                            result["hits"] = [chunks[index] for index in indices]
                         retrieval = {key: result[key] for key in ("backend", "degraded")}
                         retrieval["scope"] = "selected-excerpts" if overview else "retrieved-excerpts"
+                        retrieval["scope_overview"] = overview
                         retrieval["section"] = section
+                        retrieval["total_chunks"] = len(chunks)
                         hit_count = len(result["hits"])
                         retrieval["hits"] = hit_count
                         retrieval["retrieve_ms"] = retrieve_ms
                         retrieval["terms"] = search_terms[:24]
-                        stage_text = (f"已定位 {hit_count} 段相关原文，正在核对引用并生成回答…" if hit_count
-                                      else "未检索到直接相关的原文，正在整理回答…")
+                        if overview:
+                            stage_text = (f"已按当前范围抽取 {hit_count}/{len(chunks)} 段原文，不代表完整覆盖，"
+                                          "正在核对引用并生成回答…")
+                        else:
+                            stage_text = (f"已定位 {hit_count} 段相关原文，正在核对引用并生成回答…" if hit_count
+                                          else "未检索到直接相关的原文，正在整理回答…")
                         yield sse({"type": "status", "stage": "generate", "text": stage_text, "hits": hit_count})
                         if mode != "quiz":
                             try:
                                 for kind, value in tutor.generate_stream(question, mode, book["title"], result["hits"],
-                                                                         previous, retrieval, user_key, summary,
-                                                                         is_group=is_group):
+                                                                         previous, retrieval, user_key, generation_summary,
+                                                                         is_group=is_group, quiz_count=quiz_count,
+                                                                         quiz_level=quiz_level, selection=selection):
                                     if kind == "delta":
                                         streamed = True
                                         yield sse({"type": "delta", "text": value})
@@ -1250,9 +1504,13 @@ def create_app(test_config=None):
                                 if streamed:
                                     raise
                                 # Streaming failed before any text arrived; retry one-shot.
-                                answer = tutor.generate(question, mode, book["title"], result["hits"], previous, retrieval, user_key, summary)
+                                answer = tutor.generate(question, mode, book["title"], result["hits"], previous,
+                                                        retrieval, user_key, generation_summary, is_group=is_group,
+                                                        quiz_count=quiz_count, quiz_level=quiz_level, selection=selection)
                         else:
-                            answer = tutor.generate(question, mode, book["title"], result["hits"], previous, retrieval, user_key, summary)
+                            answer = tutor.generate(question, mode, book["title"], result["hits"], previous,
+                                                    retrieval, user_key, generation_summary, is_group=is_group,
+                                                    quiz_count=quiz_count, quiz_level=quiz_level, selection=selection)
                 except TutorError as exc:
                     add_log("chat_error", level="error",
                             detail=f"生成失败 · {str(exc)[:200]} · 问: {question[:60]}", owner_id=owner)
@@ -1263,8 +1521,9 @@ def create_app(test_config=None):
                     yield sse({"type": "error", "error": "生成失败，请重试。"})
                     return
                 retrieval["generate_ms"] = int((time.monotonic() - generate_started) * 1000)
-                if overview and answer["grounded"]:
-                    answer["notice"] = "本次按位置抽取最多 6 段原文辅助学习，不代表完整覆盖全书或本章。"
+                if overview:
+                    answer["notice"] = (f"本次按当前范围的位置抽取 {hit_count}/{len(chunks)} 段原文辅助学习（最多 6 段），"
+                                        "不代表完整覆盖当前范围、全章、全书或文献组。")
                 user_message = {"id": uid(), "role": "user", "content": question, "mode": mode, "created_at": now()}
                 answer.update(id=uid(), role="assistant", mode=mode, created_at=now())
                 # Persist before delivering: if the client disconnected, the answer still lands.
@@ -1278,12 +1537,16 @@ def create_app(test_config=None):
                     if not old:
                         db.execute("UPDATE conversations SET title=? WHERE id=? AND book_id=? AND owner_id=?",
                                    (question[:40], conversation_id, book_id, owner))
-                channel = "语义向量已启用" if not retrieval["degraded"] else "语义向量不可用（关键词检索）"
+                channel = ("按范围选段" if overview else
+                           "语义向量已启用" if not retrieval["degraded"] else "语义向量不可用（关键词检索）")
+                material_note = (f"抽取 {hit_count}/{len(chunks)} 段（不代表完整覆盖）" if overview
+                                 else f"命中 {hit_count} 段")
                 searches_note = f" · 自主检索 {retrieval['searches']} 次" if retrieval.get("searches") else ""
                 web_note = f" · 联网 {retrieval['web_searches']} 次" if retrieval.get("web_searches") else ""
                 add_log("chat", level="warning" if retrieval["degraded"] else "info",
-                        detail=(f"《{book['title']}》· {channel} · 命中 {hit_count} 段{searches_note}{web_note} · "
-                                f"检索 {retrieve_ms}ms · 生成 {retrieval.get('generate_ms', 0) / 1000:.1f}s · 问: {question[:60]}"),
+                        detail=(f"《{book['title']}》· {channel} · {material_note}{searches_note}{web_note} · "
+                                f"{'选段' if overview else '检索'} {retrieve_ms}ms · "
+                                f"生成 {retrieval.get('generate_ms', 0) / 1000:.1f}s · 问: {question[:60]}"),
                         owner_id=owner)
                 yield sse({"type": "answer", "message": answer, "user_message": user_message})
                 # Rolling compaction for long conversations: once the part not
@@ -1385,7 +1648,10 @@ def create_app(test_config=None):
     def seed_builtin_books():
         # Baked-in textbooks and literature ship with the image; every account
         # can read them. Files in builtin_books/ root are textbooks; files in
-        # builtin_books/literature/ are literature.
+        # builtin_books/literature/ are literature. Tests disable the seeder
+        # (STUDY_SEED_BUILTIN=0) to keep index slots free and runs fast.
+        if os.getenv("STUDY_SEED_BUILTIN", "1") != "1":
+            return
         folder = ROOT / "builtin_books"
         if not folder.is_dir():
             return

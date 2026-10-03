@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>分享的回答 · 书内</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script defer src="/assets/mermaid.min.js"></script>
+</head>
+<body class="share-body">
+  <main class="share-card">
+    <header class="share-head">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">书</span><span>书内<small>BOOKNOTE</small></span></a>
+      <span id="share-book" class="share-book"></span>
+    </header>
+    <p id="share-status" class="share-status">正在读取分享内容…</p>
+    <article id="share-content" class="share-content" hidden></article>
+    <footer class="share-foot">内容由 AI 依据教材片段生成，引用仍需核对 · 分享者可随时撤销链接</footer>
+  </main>
+  <script>
+    const $ = (selector) => document.querySelector(selector);
+    const token = location.pathname.split('/').pop();
+
+    function text(parent, value) {
+      const node = document.createElement('p');
+      // Bold emphasis from the answer renders as <strong>; everything stays
+      // textContent so shared model output can never inject HTML.
+      let last = 0;
+      for (const match of (value || '').matchAll(/\*\*([^*\n]+)\*\*/g)) {
+        if (match.index > last) node.append(document.createTextNode(value.slice(last, match.index)));
+        const strong = document.createElement('strong');
+        strong.textContent = match[1];
+        node.append(strong);
+        last = match.index + match[0].length;
+      }
+      if (last < (value || '').length) node.append(document.createTextNode(value.slice(last)));
+      parent.append(node);
+    }
+
+    fetch(`/api/share/${encodeURIComponent(token)}`)
+      .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || '分享不存在或已撤销。');
+        $('#share-book').textContent = `《${data.book_title}》`;
+        $('#share-status').hidden = true;
+        const box = $('#share-content');
+        box.hidden = false;
+        const question = document.createElement('p');
+        question.className = 'share-question';
+        question.textContent = data.question;
+        box.append(question);
+        (data.message.paragraphs || []).forEach((item) => text(box, item.text));
+        (data.message.quiz || []).forEach((item) => {
+          const quiz = document.createElement('details');
+          quiz.className = 'share-quiz';
+          const summary = document.createElement('summary');
+          summary.textContent = item.question;
+          quiz.append(summary);
+          const answer = document.createElement('p');
+          answer.textContent = `答案：${item.answer}`;
+          quiz.append(answer);
+          box.append(quiz);
+        });
+        const diagrams = data.message.diagrams || [];
+        if (window.mermaid) window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' });
+        diagrams.forEach((diagram, index) => {
+          const holder = document.createElement('div');
+          holder.className = 'diagram';
+          const title = document.createElement('h4');
+          title.className = 'diagram-title';
+          title.textContent = diagram.title || '图解';
+          const body = document.createElement('div');
+          body.className = 'diagram-body';
+          holder.append(title, body);
+          box.append(holder);
+          if (window.mermaid) {
+            window.mermaid.render(`share-mmd-${index}`, diagram.code)
+              .then(({ svg }) => { body.innerHTML = svg; })
+              .catch(() => { body.textContent = '图解渲染失败。'; });
+          }
+        });
+        const citations = data.message.citations || [];
+        if (citations.length) {
+          const list = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = `教材依据（${citations.length} 处章节）`;
+          list.append(summary);
+          citations.forEach((ref) => {
+            const line = document.createElement('p');
+            line.className = 'share-citation';
+            line.textContent = `${ref.label ? `[${ref.label}] ` : ''}${ref.section || ''}`;
+            list.append(line);
+          });
+          box.append(list);
+        }
+      })
+      .catch((error) => {
+        $('#share-status').textContent = error.message || '读取失败，请稍后再试。';
+      });
+  </script>
+</body>
+</html>

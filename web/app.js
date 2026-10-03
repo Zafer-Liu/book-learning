@@ -7,9 +7,34 @@ const state = {
   pending: false, loading: false, registering: false, registrationOpen: false,
   testCodeRegistration: false, apiKeySet: false, controllers: new Set(), poll: null,
   statusText: '', typing: null, streamText: '', searchSteps: [], context: null,
-  category: 'textbook', editingGroup: null,
+  category: 'textbook', editingGroup: null, pendingSelection: null, bookStats: null,
 };
 const modeNames = { qa: '教材问答', explain: '章节讲解', outline: '要点梳理', quiz: '自测练习' };
+const modeOptions = {
+  qa: {
+    action: '提问', prompt: '', title: '把问题带回教材里。',
+    placeholder: '输入概念或具体问题，例如：这两个概念有什么区别？',
+    help: '输入问题，检索教材并给出带原文引用的回答。',
+  },
+  explain: {
+    action: '开始讲解', prompt: '讲解当前范围', title: '沿着原文，把概念讲明白。',
+    placeholder: '可填写想重点理解的概念；留空则讲解所选范围',
+    help: '从学习目标、概念释义到逻辑关系与易混淆点，逐步讲解。',
+  },
+  outline: {
+    action: '生成要点', prompt: '梳理当前范围的要点', title: '把读过的内容，整理成复习线索。',
+    placeholder: '可填写要梳理的主题；留空则整理所选范围',
+    help: '整理核心要点、层次关系与复习清单，每条均可核对原文。',
+  },
+  quiz: {
+    action: '生成自测', prompt: '针对当前范围出三道自测题', title: '先试着回答，再对照原文。',
+    placeholder: '可填写想练习的主题；留空则针对所选范围出题',
+    help: '生成最多 3 道有教材依据的题目，先作答，再看解析并标记掌握情况。',
+  },
+};
+// Drafts belong to the currently loaded messages, never to another account.
+// They survive UI re-renders but are not persisted to the server or storage.
+const quizProgress = new WeakMap();
 const statusNames = { queued: '等待索引', indexing: '正在建立索引', ready: '可以学习', error: '索引失败' };
 let toastTimer;
 let evidenceSequence = 0;
@@ -355,6 +380,7 @@ async function selectBook(bookId, showPanel = true, openReader = false) {
     const detail = await api(`/api/books/${bookId}`);
     state.book = detail.book;
     state.sections = detail.sections || [];
+    state.bookStats = detail.stats || null;
     const isGroup = detail.book.category === 'group';
     $('#section-select').replaceChildren(new Option(isGroup ? '全部文献' : '整本教材', ''));
     if (!isGroup) {
@@ -445,20 +471,56 @@ function renderContextMeter() {
 
 function updateComposer() {
   const ready = state.book?.status === 'ready' && !state.loading;
+  const options = modeOptions[state.mode];
+  const webAvailable = state.mode === 'qa' && Boolean(state.config?.web_search_configured);
   $('#question').disabled = !ready || state.pending;
+  $('#question').placeholder = options.placeholder;
   $('#send').disabled = !ready || state.pending || !state.config?.llm_configured;
+  $('#send').firstChild.textContent = `${options.action} `;
   $('#cancel-send').hidden = !state.pending;
   $('#messages').setAttribute('aria-busy', String(state.pending || state.loading));
-  $('#section-select').disabled = state.pending || state.loading;
-  $('#web-search-toggle').disabled = state.pending || state.loading;
-  $('#scope-label').textContent = ready ? `仅检索：${$('#section-select').value || state.book.title}` : '先选择一本完成索引的教材';
-  $('#composer-note').textContent = $('#web-search-toggle').checked
+  $('#section-select').disabled = !ready || state.pending;
+  $('#web-toggle-label').hidden = !webAvailable;
+  $('#web-search-toggle').disabled = !ready || state.pending || !webAvailable;
+  $('#scope-label').textContent = ready ? `学习范围：${$('#section-select').value || state.book.title}` : '先选择一本完成索引的教材';
+  $('#mode-title').textContent = modeNames[state.mode];
+  $('#mode-description').textContent = options.help;
+  const isGroup = state.book?.category === 'group';
+  $('#mode-scope-hint').textContent = state.mode === 'qa'
+    ? (isGroup ? '在组内论文中查找，引用会注明来源。' : '可先选择章节，缩小查找范围。')
+    : `${isGroup ? '从组内文献选段' : '按所选章节取材，未选章节则从全书选段'}；留空点击「${options.action}」即可开始，不代表完整覆盖。`;
+  $('#composer-note').textContent = webAvailable && $('#web-search-toggle').checked
     ? '回答以当前教材为主 · 勾选联网后 W 标注内容来自网络，需自行核实 · 引用仍需核对'
     : '仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见';
   $('#new-conversation').disabled = !ready || state.pending;
   $('#delete-conversation').disabled = !ready || !state.conversation || state.pending;
+  // Quiz tuning controls appear only in quiz mode.
+  const quizOn = state.mode === 'quiz' && !isGroup;
+  $('#quiz-count-field').hidden = !quizOn;
+  $('#quiz-level-field').hidden = !quizOn;
   document.querySelectorAll('[data-mode]').forEach((button) => { button.disabled = state.pending; });
   renderContextMeter();
+}
+
+// Reader passage the user is asking about; attached to the next question.
+function renderSelectionChip() {
+  const chip = $('#selection-chip');
+  const selection = state.pendingSelection;
+  if (!selection) { chip.hidden = true; return; }
+  chip.hidden = false;
+  const quote = selection.quote.length > 90 ? selection.quote.slice(0, 90) + '…' : selection.quote;
+  $('#selection-chip-text').textContent = `将询问选文${selection.section ? `（${selection.section}）` : ''}：「${quote}」`;
+}
+
+function askAboutSelection(selection) {
+  // Called from the reader (passage or annotation): stage the context, jump
+  // to the composer and focus it; the chip can dismiss it before sending.
+  state.pendingSelection = selection;
+  renderSelectionChip();
+  setMode('qa');
+  panel('study');
+  $('#question').value = '';
+  $('#question').focus();
 }
 
 function renderBook() {
@@ -476,6 +538,11 @@ function renderBook() {
   $('#book-actions').hidden = !book || isGroup;
   $('#read-book').hidden = !book || book.status !== 'ready' || isGroup;
   $('#book-notes').hidden = !book || book.status !== 'ready' || isGroup;
+  $('#export-cards').hidden = !book || book.status !== 'ready' || isGroup;
+  if (book?.status === 'ready' && !isGroup && state.bookStats) {
+    const s = state.bookStats;
+    $('#current-meta').textContent += ` · 对话 ${s.conversations} · 提问 ${s.questions} · 批注 ${s.annotations}`;
+  }
   // Groups search every member paper: the chapter scope carries no
   // information there, so the control collapses to the conversation buttons.
   $('#section-select').closest('.select-field').hidden = Boolean(isGroup);
@@ -489,9 +556,11 @@ function renderBook() {
 }
 
 function setMode(mode) {
+  if (!Object.hasOwn(modeOptions, mode) || state.pending) return;
   state.mode = mode;
   document.querySelectorAll('[data-mode]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mode === mode)));
-  $('#send').firstChild.textContent = mode === 'quiz' ? '出题 ' : '提问 ';
+  updateComposer();
+  if (!state.messages.length) renderMessages();
 }
 
 function renderEmpty() {
@@ -508,16 +577,27 @@ function renderEmpty() {
       element('p', '', state.book.status === 'error' ? '查看上方失败原因。修正文件后重新上传，或点击“重新索引”重试。' : '索引完成后，就可以开始提问。你可以留在此页，也可以稍后再回来。'));
   } else {
     const isGroup = state.book.category === 'group';
-    container.append(element('h2', '', '从一个不太确定的地方问起。'), element('p', '', isGroup ? '提问会在组内全部论文中联合检索；引用标记注明来源论文，点击可跳转到对应原文。' : '选择章节会缩小检索范围。没有指定问题的讲解与自测，只抽取部分原文，不代表覆盖整本教材。'));
+    container.append(element('h2', '', modeOptions[state.mode].title), element('p', '', isGroup ? '提问会在组内全部论文中联合检索；引用标记注明来源论文，点击可跳转到对应原文。' : '先选择章节，也可以针对整本教材开始。讲解、梳理和自测可直接生成；范围较大时只选取部分原文，不代表完整覆盖。'));
     const suggestions = element('div', 'suggestions');
     const items = [
-      ['解释一个概念', 'qa', '请解释：'], ['梳理当前范围的要点', 'outline', '梳理本章'],
-      ['沿着原文逐步讲解', 'explain', '讲解本章'], ['用三个问题检查理解', 'quiz', '本章自测'],
+      ['解释一个概念', 'qa'], ['梳理当前范围的要点', 'outline'],
+      ['沿着原文逐步讲解', 'explain'], ['用三个问题检查理解', 'quiz'],
     ];
-    items.forEach(([label, mode, prompt]) => {
+    items.forEach(([label, mode]) => {
       const button = element('button', 'suggestion', label);
-      button.append(element('span', '', `${modeNames[mode]} ↗`));
-      button.addEventListener('click', () => { setMode(mode); $('#question').value = prompt; $('#question').focus(); });
+      button.type = 'button';
+      button.disabled = !state.config?.llm_configured;
+      button.append(element('span', '', `${modeOptions[mode].action} ↗`));
+      button.addEventListener('click', () => {
+        setMode(mode);
+        if (mode === 'qa') {
+          if (!$('#question').value.trim()) $('#question').value = '请解释：';
+          $('#question').focus();
+        } else {
+          $('#question').value = '';
+          $('#chat-form').requestSubmit();
+        }
+      });
       suggestions.append(button);
     });
     if (!isGroup) {
@@ -695,6 +775,80 @@ function renderDiagram(diagram) {
   return box;
 }
 
+function renderQuizPractice(article, message, references, reveal) {
+  const items = message.quiz || [];
+  if (!items.length) return;
+  if (!quizProgress.has(message)) {
+    quizProgress.set(message, items.map(() => ({ draft: '', open: false, rating: '' })));
+  }
+  const progress = quizProgress.get(message);
+  const locked = state.pending || Boolean(state.typing);
+  const worksheet = element('div', 'quiz-worksheet');
+  const heading = element('div', 'quiz-progress');
+  const count = element('span');
+  count.setAttribute('aria-live', 'polite');
+  const updateCount = () => {
+    count.textContent = `${items.length} 题 · 已作答 ${progress.filter((p) => p.draft.trim()).length} · 已掌握 ${progress.filter((p) => p.rating === 'understood').length} · 待复习 ${progress.filter((p) => p.rating === 'review').length}`;
+  };
+  updateCount();
+  heading.append(element('strong', '', '自测答题纸'), count);
+  worksheet.append(heading, element('p', 'quiz-local-note', '作答与自评仅在当前对话页面保留，刷新或切换对话后清空；自评不是自动评分。'));
+  items.forEach((item, index) => {
+    const attempt = progress[index];
+    const full = `${index + 1}. ${item.question}`;
+    const shown = reveal ? full.slice(0, reveal[index] || 0) : full;
+    const quiz = element('section', 'quiz-item');
+    quiz.append(element('p', 'quiz-question', shown));
+    if (reveal && (reveal[index] || 0) < full.length) {
+      quiz.append(element('span', 'type-cursor', '▍'));
+    } else {
+      const label = element('label', 'quiz-draft-label', '你的答案');
+      const draft = element('textarea', 'quiz-draft');
+      draft.rows = 3;
+      draft.maxLength = 3000;
+      draft.placeholder = '先尝试用自己的话回答，再展开参考答案。';
+      draft.value = attempt.draft;
+      draft.disabled = locked;
+      draft.dataset.messageId = message.id || '';
+      draft.dataset.questionIndex = String(index);
+      draft.addEventListener('input', () => { attempt.draft = draft.value; updateCount(); });
+      label.append(draft);
+      const details = element('details');
+      details.open = attempt.open;
+      details.addEventListener('toggle', () => { attempt.open = details.open; });
+      const summary = element('summary', '', '对照参考答案与教材解析');
+      const answer = element('p', 'quiz-answer');
+      const explanation = element('p', 'quiz-answer');
+      appendInline(answer, `参考答案：${item.answer}`);
+      appendInline(explanation, `教材解析：${item.explanation}`);
+      details.append(summary, answer, explanation);
+      (item.citations || []).forEach((citation) => details.append(citationButton(citation, references, message)));
+      const rating = element('div', 'quiz-rating');
+      rating.setAttribute('role', 'group');
+      rating.setAttribute('aria-label', `第 ${index + 1} 题掌握情况自评`);
+      rating.append(element('span', '', '对照后自评'));
+      const buttons = [];
+      [['understood', '已掌握'], ['review', '待复习']].forEach(([value, text]) => {
+        const button = element('button', 'outline-button', text);
+        button.type = 'button';
+        button.disabled = locked;
+        button.setAttribute('aria-pressed', String(attempt.rating === value));
+        button.addEventListener('click', () => {
+          attempt.rating = attempt.rating === value ? '' : value;
+          buttons.forEach(([node, key]) => node.setAttribute('aria-pressed', String(attempt.rating === key)));
+          updateCount();
+        });
+        buttons.push([button, value]);
+        rating.append(button);
+      });
+      details.append(rating);
+      quiz.append(label, details);
+    }
+    worksheet.append(quiz);
+  });
+  article.append(worksheet);
+}
+
 function renderAssistantBody(article, message, reveal) {
   const references = message.citations || [];
   const typing = Boolean(reveal);
@@ -705,20 +859,7 @@ function renderAssistantBody(article, message, reveal) {
     if (typing && !complete) paragraph.append(element('span', 'type-cursor', '▍'));
     article.append(paragraph);
   });
-  (message.quiz || []).forEach((item, index) => {
-    const full = `${index + 1}. ${item.question}`;
-    const shown = typing ? full.slice(0, reveal[index] || 0) : full;
-    const quiz = element('section', 'quiz-item');
-    quiz.append(element('p', 'quiz-question', shown));
-    if (typing && (reveal[index] || 0) < full.length) quiz.append(element('span', 'type-cursor', '▍'));
-    if (!typing || (reveal[index] || 0) >= full.length) {
-      const details = element('details');
-      details.append(element('summary', '', '思考后，查看答案与解析'), element('p', 'quiz-answer', item.answer), element('p', 'quiz-answer', item.explanation));
-      (item.citations || []).forEach((label) => details.append(citationButton(label, references, message)));
-      quiz.append(details);
-    }
-    article.append(quiz);
-  });
+  renderQuizPractice(article, message, references, reveal);
   // Diagrams the model attached via draw_diagram render once the answer is
   // final (never during the live stream or the typing replay).
   if (!typing) (message.diagrams || []).forEach((diagram) => article.append(renderDiagram(diagram)));
@@ -782,6 +923,28 @@ function feedbackRow(message) {
     input.focus();
   });
   row.append(element('span', 'feedback-label', '这条回答对你有帮助吗'), good, bad);
+  // One-off read-only share link for this answer (question + paragraphs,
+  // citations and diagrams; web references and identity stay private).
+  const share = element('button', 'feedback-button share-button', '分享');
+  share.addEventListener('click', async () => {
+    share.disabled = true;
+    try {
+      const data = await api(`/api/books/${state.book.id}/conversations/${state.conversation.id}`
+        + `/messages/${message.id}/share`, { method: 'POST', body: {} });
+      const url = new URL(data.url, location.origin).toString();
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('分享链接已复制；可在设置中随时撤销对应记录。');
+      } catch {
+        prompt('复制分享链接：', url);
+      }
+    } catch (error) {
+      toast(error.message || '分享创建失败，请重试。');
+    } finally {
+      share.disabled = false;
+    }
+  });
+  row.append(share);
   return row;
 }
 
@@ -798,6 +961,10 @@ async function sendFeedback(message, rating, reason) {
 
 function renderMessages() {
   const container = $('#messages');
+  const active = document.activeElement;
+  const editingQuiz = container.contains(active) && active.classList.contains('quiz-draft')
+    ? { messageId: active.dataset.messageId, index: active.dataset.questionIndex,
+        start: active.selectionStart, end: active.selectionEnd } : null;
   const follow = state.pending || container.scrollHeight - container.scrollTop - container.clientHeight < 120;
   container.replaceChildren();
   if (!state.messages.length && !state.pending && !state.typing) container.append(renderEmpty());
@@ -837,26 +1004,28 @@ function renderMessages() {
     }
     container.append(element('p', 'waiting', state.statusText || '正在检索本书，并核对回答引用…'));
   }
-  if (follow) container.scrollTop = container.scrollHeight;
+  if (editingQuiz) {
+    const draft = Array.from(container.querySelectorAll('.quiz-draft')).find((node) =>
+      node.dataset.messageId === editingQuiz.messageId && node.dataset.questionIndex === editingQuiz.index);
+    if (draft && !draft.disabled) {
+      draft.focus({ preventScroll: true });
+      draft.setSelectionRange(editingQuiz.start, editingQuiz.end);
+    }
+  }
+  if (follow && !editingQuiz) container.scrollTop = container.scrollHeight;
 }
 
 const readerUI = createReader({
   api, element, panel, toast,
-  getBook: () => state.book,
+  findBook: (bookId) => state.books.find((book) => book.id === bookId)
+    || state.groups.find((group) => group.id === bookId) || null,
   getEpoch: () => state.epoch,
+  onAsk: askAboutSelection,
 });
 
 async function showEvidence(bookId, reference) {
-  // Group answers cite member papers, but the reader only opens the currently
-  // selected book: hop the shelf to the citation's owner before anchoring.
-  if (bookId !== state.book?.id) {
-    try {
-      await selectBook(bookId, false);
-    } catch (error) {
-      toast(error.message || '无法打开引用所在文献。');
-      return;
-    }
-  }
+  // The reader opens the cited book on its own, so following a group citation
+  // no longer hops the shelf (which would swap the conversation underfoot).
   return readerUI.open(bookId, { anchor: reference.chunk_id });
 }
 
@@ -1044,7 +1213,6 @@ action($('#book-notes'), 'click', () => state.book && readerUI.open(state.book.i
 action($('#new-conversation'), 'click', () => selectConversation(''));
 action($('#delete-conversation'), 'click', deleteConversation);
 $('#section-select').addEventListener('change', () => {
-  $('#question').value = '';
   updateComposer();
   if (!readerUI.isFocused()) clearEvidence();
 });
@@ -1058,16 +1226,22 @@ $('#question').addEventListener('keydown', (event) => {
 $('#chat-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const question = $('#question').value.trim();
-  if (!question || !state.book || state.pending || state.loading || !state.config?.llm_configured) return;
+  if (state.book?.status !== 'ready' || state.pending || state.loading || !state.config?.llm_configured) return;
   const bookId = state.book.id;
   const epoch = state.epoch;
   const mode = state.mode;
+  if (!question && mode === 'qa') {
+    toast('请先输入想问的概念或问题。');
+    $('#question').focus();
+    return;
+  }
   const section = $('#section-select').value || null;
+  const web = mode === 'qa' && Boolean(state.config.web_search_configured) && $('#web-search-toggle').checked;
   state.pending = true;
-  state.statusText = '';
+  state.statusText = mode === 'qa' ? '正在检索教材…' : `正在准备${modeNames[mode]}…`;
   state.searchSteps = [];
   $('#question').value = '';
-  const optimistic = { role: 'user', content: question, mode, created_at: null };
+  const optimistic = { role: 'user', content: question || modeOptions[mode].prompt, mode, created_at: null };
   state.messages.push(optimistic);
   updateComposer();
   renderMessages();
@@ -1078,8 +1252,16 @@ $('#chat-form').addEventListener('submit', async (event) => {
       state.conversations.unshift(data.conversation);
     }
     const cid = state.conversation.id;
-    await streamChat(`/api/books/${bookId}/conversations/${cid}/messages`,
-      { message: question, mode, section, web: $('#web-search-toggle').checked }, (evt) => {
+    // Reader selections and quiz tuning ride along on this question only.
+    const payload = { message: question, mode, section, web: $('#web-search-toggle').checked };
+    if (state.pendingSelection) payload.selection = state.pendingSelection;
+    if (mode === 'quiz') {
+      payload.quiz_count = Number($('#quiz-count').value) || 3;
+      payload.quiz_level = $('#quiz-level').value;
+    }
+    state.pendingSelection = null;
+    renderSelectionChip();
+    await streamChat(`/api/books/${bookId}/conversations/${cid}/messages`, payload, (evt) => {
       if (epoch !== state.epoch) return;
       if (evt.type === 'status') {
         // A new agent search round invalidates the previous preview text.
@@ -1269,6 +1451,112 @@ applyLayout();
 if (window.mermaid) {
   window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' });
 }
+$('#selection-chip-remove').addEventListener('click', () => {
+  state.pendingSelection = null;
+  renderSelectionChip();
+});
+action($('#export-cards'), 'click', async () => {
+  if (!state.book) return;
+  // Probe first so an empty deck shows a toast instead of a raw JSON page.
+  const response = await fetch(`/api/books/${state.book.id}/export/cards.csv`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    toast((data && data.error) || '导出失败，请稍后再试。');
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = element('a');
+  link.href = url;
+  link.download = `cards-${state.book.id.slice(0, 8)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+});
+
+// Guest demo on the login page: builtin books, IP-throttled, nothing saved.
+const demo = { books: [], busy: false };
+$('#demo-toggle').addEventListener('click', async () => {
+  const box = $('#demo-box');
+  box.hidden = !box.hidden;
+  if (box.hidden || demo.books.length) return;
+  try {
+    const data = await fetch('/api/demo/books').then((r) => r.json());
+    demo.books = data.books || [];
+    const select = $('#demo-book');
+    select.replaceChildren();
+    if (!demo.books.length) {
+      select.append(new Option('暂无可用内置教材', ''));
+      return;
+    }
+    demo.books.forEach((book) => select.add(new Option(`${book.title} · ${book.section_count} 章`, book.id)));
+  } catch {
+    $('#demo-book').replaceChildren(new Option('内置教材读取失败，请刷新重试', ''));
+  }
+});
+$('#demo-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (demo.busy) return;
+  const bookId = $('#demo-book').value;
+  const question = $('#demo-question').value.trim();
+  if (!bookId || !question) return;
+  demo.busy = true;
+  $('#demo-send').disabled = true;
+  const box = $('#demo-messages');
+  const ask = element('div', 'demo-message user', question);
+  const answer = element('div', 'demo-message assistant', '正在检索这本教材…');
+  box.append(ask, answer);
+  $('#demo-question').value = '';
+  box.scrollTop = box.scrollHeight;
+  try {
+    const response = await fetch('/api/demo/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ book_id: bookId, message: question }),
+    });
+    if (!response.ok || !response.body) {
+      const data = await response.json().catch(() => null);
+      throw new Error((data && data.error) || `请求失败（${response.status}）`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary;
+      while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const line = frame.split('\n').find((part) => part.startsWith('data: '));
+        if (!line) continue;
+        const evt = JSON.parse(line.slice(6));
+        if (evt.type === 'status') {
+          answer.textContent = evt.text;
+        } else if (evt.type === 'delta') {
+          answer.textContent += evt.text;
+        } else if (evt.type === 'answer') {
+          answer.replaceChildren();
+          (evt.message.paragraphs || []).forEach((item) => answer.append(element('p', '', item.text.replace(/\[([CW]\d+)\]/g, ''))));
+          const cites = (evt.message.citations || []).filter((c) => c.kind !== 'web');
+          if (cites.length) {
+            answer.append(element('p', 'demo-citations',
+              `依据：${cites.slice(0, 6).map((c) => c.section || c.title || '').filter(Boolean).join('；')}`));
+          }
+          answer.append(element('p', 'demo-note', '体验回答 · 对话不保存 · 注册后可展开引用、批注与图解'));
+        } else if (evt.type === 'error') {
+          throw new Error(evt.error);
+        }
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+  } catch (error) {
+    answer.textContent = error.message || '体验请求失败，请稍后再试。';
+  } finally {
+    demo.busy = false;
+    $('#demo-send').disabled = false;
+  }
+});
 loadIdentity().catch((error) => {
   $('#auth-error').textContent = error.message || '暂时无法连接服务，请刷新重试。';
 });

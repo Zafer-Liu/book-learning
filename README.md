@@ -119,7 +119,10 @@ flowchart LR
 - **Four study modes** — Q&A (model-driven multi-round retrieval), chapter explanation, key-point outlining, self-testing (answers folded by default); retrieval can be narrowed to a section.
 - **Evidence-constrained generation** — as in Diagram 4: answers must stand on this turn's retrieved evidence; otherwise an explicit refusal.
 - **Automatic emphasis** — the model marks key terms, conclusions and numbers with **bold** (the only Markdown token allowed); the client renders it safely with no HTML injection.
-- **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model).
+- **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model); select any passage to **ask the tutor about it**, and annotations offer one-click follow-ups.
+- **Agent powers in every mode** — all four modes let the model retrieve and diagram on its own; self-tests accept count (3/5/10) and depth tuning, and every quiz exports to **Anki-compatible CSV cards**.
+- **Sharing & demo** — any answer can produce a revocable read-only share link; the login page offers a rate-limited, non-persisting **online demo** over the builtin books.
+- **Reading position memory** — per-book reading positions are remembered locally; book headers show conversation/question/annotation stats.
 - **Compaction + context meter** — as in Diagram 3.
 - **Opt-in web supplement** — appears only when `STUDY_SEARCH_API_KEY` is set (defaults to Zhipu's `web-search-pro` tools API — any ordinary Zhipu key works; a remote MCP is also supported), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
 - **Built-in diagram tool** — when a process, structure or hierarchy is hard to convey in prose, the agent calls `draw_diagram` on its own to attach mermaid flowcharts/mindmaps (max 3 per answer, content bound to the retrieved evidence); they render inline and persist with the answer.

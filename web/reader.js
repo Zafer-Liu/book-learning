@@ -1,10 +1,12 @@
 // Source-backed reader. All positions use JavaScript's UTF-16 string offsets.
-export function createReader({ api, element, getBook, getEpoch, panel, toast }) {
+export function createReader({ api, element, findBook, getEpoch, panel, toast, onAsk }) {
   const $ = (selector) => document.querySelector(selector);
   let current = null;
   let editor = null;
   const colors = new Set(['yellow', 'blue', 'green']);
-  const live = (reader) => current === reader && reader.epoch === getEpoch() && reader.bookId === getBook()?.id;
+  // The reader owns its book identity; shelf switches reset it via
+  // clearEvidence, so liveness only tracks the epoch of async callbacks.
+  const live = (reader) => current === reader && reader.epoch === getEpoch();
   const button = (text, callback, className = 'outline-button') => {
     const node = element('button', className, text);
     node.type = 'button';
@@ -152,7 +154,7 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
   }
 
   function preserveForConversation() {
-    if (!focused || !current || current.bookId !== getBook()?.id) return false;
+    if (!focused || !current) return false;
     if (current.epoch === getEpoch()) return true;
     // Replace the reader identity so aborted callbacks cannot mutate its successor.
     const old = current;
@@ -185,7 +187,7 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
     $('#reader-focus').hidden = false;
     const shell = element('div', 'reader-shell');
     const tools = element('div', 'reader-tools');
-    tools.append(element('h3', 'reader-book-title', getBook().title));
+    tools.append(element('h3', 'reader-book-title', reader.title));
     const directory = element('label', 'reader-directory', '目录');
     reader.tocSelect = element('select');
     reader.tocSelect.setAttribute('aria-label', '跳转到正文目录');
@@ -206,8 +208,15 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
     reader.annotateButton = button('选文批注', () => openEditor(reader, null, reader.selection));
     reader.annotateButton.disabled = true;
     reader.annotateButton.addEventListener('pointerdown', (event) => event.preventDefault());
-    actions.append(reader.notesButton, reader.annotateButton,
-      button('从头阅读', () => navigate(reader, {}), 'text-button'));
+    // Ask the tutor about the current passage; disabled alongside annotate.
+    reader.askButton = button('问 AI 此段', () => {
+      if (!reader.selection) return;
+      onAsk?.({ quote: reader.selection.quote, section: passageSection(reader) });
+    });
+    reader.askButton.disabled = true;
+    reader.askButton.addEventListener('pointerdown', (event) => event.preventDefault());
+    actions.append(reader.notesButton, reader.annotateButton, reader.askButton,
+                   button('从头阅读', () => navigate(reader, {}), 'text-button'));
     tools.append(actions);
     reader.hint = element('p', 'reader-hint', '选中文字后，可添加高亮或笔记；仅自己可见。');
     tools.append(reader.hint);
@@ -231,6 +240,11 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
         reader.frame = null;
         if (!live(reader)) return;
         updateProgress(reader);
+        const stamp = Date.now();
+        if (!reader.positionSavedAt || stamp - reader.positionSavedAt > 3000) {
+          reader.positionSavedAt = stamp;
+          rememberPosition(reader);
+        }
         if (reader.navigating || reader.loading || !reader.blocks.length || reader.selection || $('#annotation-dialog').open) return;
         const box = reader.scroll;
         if (box.scrollTop <= 180 && reader.blocks[0].index > 0 && !reader.errors.before) extend(reader, 'before');
@@ -274,6 +288,37 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
     reader.progress.textContent = `正文位置 ${atEnd ? 100 : Math.min(99, Math.floor(block.start / reader.length * 100))}% · OCR 原文，非原书页码`;
     const section = reader.toc.filter((item) => item.start <= block.start).at(-1);
     if (section) reader.tocSelect.value = String(section.start);
+  }
+
+  function passageSection(reader) {
+    // Chapter title covering the current viewport, for ask-context.
+    if (!reader.toc?.length || !reader.blocks.length) return '';
+    const top = reader.scroll.getBoundingClientRect().top;
+    const node = [...reader.stream.children].find((item) => item.getBoundingClientRect().bottom > top);
+    const block = reader.blocks.find((item) => item.index === Number(node?.dataset.index)) || reader.blocks[0];
+    const section = reader.toc.filter((item) => item.start <= block.start).at(-1);
+    return section?.title || '';
+  }
+
+  function rememberPosition(reader) {
+    // Local-only reading position per book; restored on the next open.
+    if (!reader.blocks.length || !reader.version) return;
+    const top = reader.scroll.getBoundingClientRect().top;
+    const node = [...reader.stream.children].find((item) => item.getBoundingClientRect().bottom > top);
+    const block = reader.blocks.find((item) => item.index === Number(node?.dataset.index));
+    if (!block) return;
+    try {
+      localStorage.setItem(`study.read.${reader.bookId}`,
+        JSON.stringify({ start: block.start, version: reader.version }));
+    } catch { /* storage full or blocked: skip silently */ }
+  }
+
+  function recallPosition(reader) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`study.read.${reader.bookId}`) || 'null');
+      if (saved && typeof saved.start === 'number') return saved;
+    } catch { /* ignore malformed entries */ }
+    return null;
   }
 
   function textNode(reader, block) {
@@ -391,7 +436,8 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
       reader.scroll.scrollTop = 0;
       reader.hint.textContent = data.anchor ? '蓝色底纹为本次引用；可上下连续阅读，选文添加私人批注。' : '选中文字后，可添加高亮或笔记；仅自己可见。';
       renderNotes(reader);
-      const target = data.anchor?.start ?? params.at ?? 0;
+      const saved = params.anchor ? null : recallPosition(reader);
+      const target = params.at ?? data.anchor?.start ?? saved?.start ?? 0;
       requestAnimationFrame(() => { if (live(reader) && navigation === reader.navigation) jumpTo(reader, target); });
     } catch (error) {
       if (!live(reader) || navigation !== reader.navigation) return;
@@ -478,6 +524,7 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
       if (note.note) row.append(element('p', 'reader-note-body', note.note));
       const foot = element('div', 'reader-note-foot');
       foot.append(element('span', '', old ? '旧版本 · 保留原选文' : !reader.version ? '尚未核对正文版本' : '当前版本'),
+        button('追问', () => onAsk?.({ quote: note.quote, section: passageSection(reader) }), 'text-button'),
         button('编辑', () => openEditor(reader, note), 'text-button'));
       row.append(foot);
       list.append(row);
@@ -535,6 +582,7 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
       if (start !== null && end !== null && end - start > 4000) reader.hint.textContent = '一次最多选择 4000 个字符，请缩小选文范围。';
     }
     reader.annotateButton.disabled = !reader.selection;
+    reader.askButton.disabled = !reader.selection;
     if (reader.selection) reader.hint.textContent = `已选 ${reader.selection.end - reader.selection.start} 个字符 · 点击“选文批注”保存高亮或笔记。`;
     else if (!selection || selection.isCollapsed) {
       reader.hint.textContent = reader.anchor ? '蓝色底纹为本次引用；选文可添加私人批注。' : '选中文字后，可添加高亮或笔记；仅自己可见。';
@@ -603,8 +651,9 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
   }
 
   async function open(bookId, { anchor, notes = false, expanded = false } = {}) {
-    if (bookId !== getBook()?.id) return;
-    if (current && live(current)) {
+    // Citations carry their own book: a group answer can open a member paper
+    // here while the study panel keeps showing the group conversation.
+    if (current && live(current) && current.bookId === bookId) {
       const reader = current;
       if (expanded) setFocus(true);
       panel('evidence');
@@ -618,7 +667,7 @@ export function createReader({ api, element, getBook, getEpoch, panel, toast }) 
       return;
     }
     reset();
-    const reader = { bookId, epoch: getEpoch(), navigation: 0, version: null, blocks: [], annotations: [],
+    const reader = { bookId, title: findBook(bookId)?.title || bookId, epoch: getEpoch(), navigation: 0, version: null, blocks: [], annotations: [],
       toc: [], anchor: null, total: 0, length: 0, notesOpen: notes, notesLoaded: false, notesLoading: false,
       errors: {}, loading: null, navigating: false, selection: null };
     current = reader;

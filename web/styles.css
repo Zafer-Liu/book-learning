@@ -178,13 +178,27 @@ h1, h2, h3, p { margin: 0; }
 .search-trace-row.error { color: var(--warning); }
 .type-cursor { color: var(--blue); margin-left: 2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+.quiz-worksheet { border-left: 3px solid var(--green); padding-left: 16px; }
+.quiz-progress { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 6px; }
+.quiz-progress strong { font: 18px/1.6 var(--serif); color: var(--green); }
+.quiz-progress span { color: var(--muted); font-size: 11px; line-height: 1.8; }
+.quiz-local-note { color: var(--muted); font-size: 10px; line-height: 1.8; margin-bottom: 18px; }
 .quiz-item { margin-bottom: 22px; }
 .quiz-question { font-size: 13px; line-height: 1.9; white-space: pre-wrap; }
+.quiz-draft-label { margin-top: 12px; color: var(--muted); font-size: 11px; }
+.quiz-draft { display: block; width: 100%; min-height: 90px; resize: vertical; padding: 10px 12px; margin-top: 6px; font-size: 12px; line-height: 1.9; }
 .quiz-item details { padding: 10px 13px; margin-top: 10px; background: var(--paper); border-radius: 5px; }
 .quiz-item summary { font-size: 11px; cursor: pointer; color: var(--blue); }
 .quiz-answer { white-space: pre-wrap; line-height: 1.9; font-size: 12px; margin: 13px 0 6px; }
+.quiz-rating { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.quiz-rating > span { color: var(--muted); font-size: 11px; }
+.quiz-rating button[aria-pressed="true"] { border-color: var(--green); color: var(--green); background: var(--white); }
 .composer-wrap { padding: 8px 30px 16px; }
-.modes { display: flex; gap: 5px; margin-bottom: 11px; }
+.mode-guide { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 3px 10px; margin-bottom: 10px; font-size: 11px; line-height: 1.8; }
+.mode-guide strong { color: var(--green); font-weight: 600; }
+.mode-guide span { color: var(--ink); }
+.mode-guide small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.modes { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 11px; }
 .modes button { border-radius: 5px; padding: 7px 11px; font-size: 11px; color: var(--muted); }
 .modes button:hover { background: var(--paper); }
 .modes button[aria-pressed="true"] { background: var(--blue-soft); color: var(--blue); }
@@ -207,6 +221,35 @@ h1, h2, h3, p { margin: 0; }
 .send-button { background: var(--blue); color: var(--white); border-radius: 6px; padding: 9px 14px; font-size: 11px; }
 .send-button span { margin-left: 8px; }
 .composer-note { font-size: 9px; color: var(--muted); text-align: center; margin-top: 9px; line-height: 1.7; }
+.selection-chip { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 5px 10px; border: 1px dashed #c9b98a; border-radius: 6px; background: var(--warning-bg); color: var(--warning); font-size: 10px; line-height: 1.6; }
+.selection-chip span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-toggle select { border: 1px solid var(--line); border-radius: 4px; background: var(--white); font-size: 11px; padding: 2px 4px; color: var(--ink); }
+.demo-toggle { display: block; margin: 10px auto 0; }
+.demo-box { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--white); }
+.demo-box h3 { font-size: 13px; margin-bottom: 6px; }
+.demo-box .muted { font-size: 10px; line-height: 1.8; margin-bottom: 10px; }
+.demo-book-field { display: block; font-size: 10px; color: var(--muted); margin-bottom: 10px; }
+.demo-book-field select { width: 100%; margin-top: 4px; padding: 7px 9px; border: 1px solid #bdcce2; border-radius: 6px; font-size: 12px; }
+.demo-messages { display: grid; gap: 8px; max-height: 300px; overflow-y: auto; margin-bottom: 10px; }
+.demo-message { padding: 8px 11px; border-radius: 8px; font-size: 12px; line-height: 1.9; white-space: pre-wrap; }
+.demo-message.user { background: var(--blue-soft); color: var(--ink); justify-self: end; max-width: 88%; }
+.demo-message.assistant { background: var(--paper); justify-self: start; max-width: 95%; }
+.demo-citations { font-size: 10px; color: var(--muted); }
+.demo-note { font-size: 9px; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 6px; }
+.demo-form { display: flex; gap: 8px; align-items: flex-end; }
+.demo-form textarea { flex: 1; resize: vertical; min-height: 44px; padding: 9px 11px; font-size: 12px; border: 1px solid #bdcce2; border-radius: 7px; }
+.share-body { display: flex; min-height: 100vh; align-items: flex-start; justify-content: center; padding: 40px 16px; background: var(--paper); }
+.share-card { width: min(720px, 100%); background: var(--white); border: 1px solid var(--line); border-radius: 12px; padding: 26px 30px; }
+.share-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.share-book { font-size: 12px; color: var(--muted); }
+.share-status { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+.share-question { background: var(--paper); border-radius: 8px; padding: 12px 15px; font-size: 13px; margin-bottom: 16px; }
+.share-content p { font-size: 13px; line-height: 2; }
+.share-content strong { background: linear-gradient(transparent 62%, #f7e8c8 62%); }
+.share-quiz { margin: 12px 0; font-size: 13px; }
+.share-quiz p { color: var(--muted); padding-left: 14px; }
+.share-citation { font-size: 11px; color: var(--muted); }
+.share-foot { margin-top: 22px; padding-top: 12px; border-top: 1px dashed var(--line); font-size: 10px; color: var(--muted); text-align: center; }
 .evidence { border-left: 1px solid var(--line); padding: 25px 22px; overflow-y: auto; background: #f8fafc; }
 .evidence-symbol { color: #94a5c0; font: 21px var(--serif); }
 .evidence-content { padding-top: 18px; }
@@ -305,6 +348,7 @@ h1, h2, h3, p { margin: 0; }
   .modes button { flex: 1; padding: 7px 3px; }
   .composer-note { font-size: 8px; }
   .composer textarea { font-size: 16px; min-height: 64px; }
+  .quiz-draft { font-size: 16px; }
   .notice { margin-left: 17px; margin-right: 17px; }
   #scope-label { max-width: 180px; }
   .upload-dialog { padding: 22px; }
