@@ -27,7 +27,7 @@ from .compaction import (
     record_compaction_result, should_compact,
 )
 from .database import BUILTIN_OWNER, Database, public_book, public_message
-from .documents import FORMATS, parse_document, split_sections
+from .documents import FORMATS, PARSER_VERSION, parse_document, split_sections
 from .rag import EmbeddingClient, index_tokens, retrieve, semantic_sentence_ranges, terms
 from .reader import register_reader_routes
 from .tutor import MODES, Tutor, TutorError
@@ -691,8 +691,9 @@ def create_app(test_config=None):
                         "INSERT INTO chunks(owner_id,book_id,ordinal,section,page,text,embedding,embedding_space) VALUES(?,?,?,?,?,?,?,?)",
                         (owner_id, book_id, chunk["ordinal"], chunk["section"], chunk["page"], chunk["text"], vector, space))
                     db.execute("INSERT INTO chunks_fts(rowid,tokens) VALUES(?,?)", (cursor.lastrowid, index_tokens(chunk["text"])))
-                db.execute("UPDATE books SET status='ready',error='',chunk_count=?,section_count=?,index_backend=? WHERE id=? AND owner_id=?",
-                           (len(chunks), len({chunk["section"] for chunk in chunks}), backend, book_id, owner_id))
+                db.execute("UPDATE books SET status='ready',error='',chunk_count=?,section_count=?,index_backend=?,parser_version=? WHERE id=? AND owner_id=?",
+                           (len(chunks), len({chunk["section"] for chunk in chunks}), backend,
+                            PARSER_VERSION, book_id, owner_id))
             add_log("index_ready", detail=(
                 f"《{book_title}》索引完成 · {len(chunks)} 段 · "
                 f"{'语义向量已启用' if vectors else '语义向量未启用（关键词检索）'} · {backend}"), owner_id=owner_id)
@@ -1616,7 +1617,9 @@ def create_app(test_config=None):
                                  (book_id, BUILTIN_OWNER)).fetchone()
                 if row is not None and row["status"] == "ready":
                     source = root / row["source_path"]
-                    if row["filename"] == path.name and source.is_file() and source.read_bytes() == path.read_bytes():
+                    if (row["filename"] == path.name and source.is_file()
+                            and source.read_bytes() == path.read_bytes()
+                            and row["parser_version"] == PARSER_VERSION):
                         return
                 if row is None:
                     folder = root / "sources" / BUILTIN_OWNER

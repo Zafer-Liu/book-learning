@@ -8,6 +8,12 @@ from xml.etree import ElementTree as ET
 FORMATS = {".md", ".markdown", ".txt", ".docx"}
 MAX_CHARS = 4_000_000
 MAX_CHUNKS = 10_000
+# Bump whenever parsing/chunking behaviour changes: stored indexes carry the
+# version they were built with, and the builtin-book seeder reindexes (and
+# invalidates conversations) when it sees a different one.
+#   2 — self-closing fences, OCR-spaced labels, title-section merging,
+#       sentence-boundary chunk tails.
+PARSER_VERSION = 2
 
 _DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 _W = "{" + _DOCX_NS["w"] + "}"

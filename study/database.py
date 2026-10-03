@@ -129,6 +129,9 @@ class Database:
             columns = [row[1] for row in db.execute("PRAGMA table_info(books)")]
             if "category" not in columns:
                 db.execute("ALTER TABLE books ADD COLUMN category TEXT NOT NULL DEFAULT 'textbook'")
+            # Parser version stamp: 0 = built before versioned parsing.
+            if "parser_version" not in columns:
+                db.execute("ALTER TABLE books ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 0")
             self._migrate_books_category_check(db)
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(tokens)")
             db.executescript("""
