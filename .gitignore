@@ -12,6 +12,7 @@ __pycache__/
 node_modules/
 dist/
 Asset/
+.zvec-grep/
 # railway up packs its upload context from git-visible files, so builtin_books
 # (copyrighted, never pushed) must stay UNTRACKED but NOT ignored: they ride
 # the build context as plain untracked files, guarded by a local pre-commit

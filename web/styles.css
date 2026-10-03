@@ -221,6 +221,11 @@ h1, h2, h3, p { margin: 0; }
 .send-button { background: var(--blue); color: var(--white); border-radius: 6px; padding: 9px 14px; font-size: 11px; }
 .send-button span { margin-left: 8px; }
 .composer-note { font-size: 9px; color: var(--muted); text-align: center; margin-top: 9px; line-height: 1.7; }
+.reader-popover { position: fixed; z-index: 60; display: flex; gap: 4px; padding: 5px 7px; border: 1px solid #bdcce2; border-radius: 8px; background: var(--white); box-shadow: 0 6px 22px #172b4d1f; animation: popover-in .12s ease-out; }
+.reader-popover.below { box-shadow: 0 -6px 22px #172b4d1f; }
+.reader-popover button { border: 0; background: transparent; color: var(--blue); font-size: 11px; padding: 4px 9px; border-radius: 5px; white-space: nowrap; }
+.reader-popover button:hover { background: var(--blue-soft); }
+@keyframes popover-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 .selection-chip { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 5px 10px; border: 1px dashed #c9b98a; border-radius: 6px; background: var(--warning-bg); color: var(--warning); font-size: 10px; line-height: 1.6; }
 .selection-chip span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .web-toggle select { border: 1px solid var(--line); border-radius: 4px; background: var(--white); font-size: 11px; padding: 2px 4px; color: var(--ink); }

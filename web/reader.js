@@ -144,6 +144,7 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     if (current?.frame) cancelAnimationFrame(current.frame);
     current = null;
     editor = null;
+    hidePopover();
     if ($('#annotation-dialog').open) $('#annotation-dialog').close();
     $('#annotation-form').reset();
     $('#annotation-quote').textContent = '';
@@ -235,6 +236,7 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     reader.scroll.append(reader.before, reader.stream, reader.after);
     reader.progress = element('p', 'reader-progress', '正在读取正文…');
     reader.scroll.addEventListener('scroll', () => {
+      hidePopover();
       if (reader.frame) return;
       reader.frame = requestAnimationFrame(() => {
         reader.frame = null;
@@ -565,10 +567,56 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     return Number(text.dataset.start) + range.toString().length;
   }
 
+  // Floating selection toolbar: appears next to the mouse-up point and offers
+  // annotate / ask without reaching for the top buttons (which stay as the
+  // accessible fallback).
+  let popover = null;
+  let popoverTimer = null;
+
+  function hidePopover() {
+    clearTimeout(popoverTimer);
+    popoverTimer = null;
+    if (popover) popover.remove();
+    popover = null;
+  }
+
+  function showPopover(reader, selection) {
+    hidePopover();
+    popover = element('div', 'reader-popover');
+    popover.setAttribute('role', 'toolbar');
+    popover.setAttribute('aria-label', '选文操作');
+    const highlight = button('高亮批注', () => {
+      hidePopover();
+      openEditor(reader, null, selection);
+    });
+    highlight.type = 'button';
+    const ask = button('问 AI', () => {
+      hidePopover();
+      onAsk?.({ quote: selection.quote, section: passageSection(reader) });
+    });
+    ask.type = 'button';
+    popover.append(highlight, ask);
+    document.body.append(popover);
+    // Place it above the selection end, flipping below when near the top.
+    const box = popover.getBoundingClientRect();
+    const anchor = window.getSelection().getRangeAt(0).getBoundingClientRect();
+    const left = Math.min(Math.max(8, anchor.left + anchor.width / 2 - box.width / 2),
+                          window.innerWidth - box.width - 8);
+    const above = anchor.top > box.height + 12;
+    popover.style.left = `${Math.round(left)}px`;
+    popover.style.top = `${Math.round(above ? anchor.top - box.height - 8 : anchor.bottom + 8)}px`;
+    popover.classList.toggle('below', !above);
+    highlight.focus({ preventScroll: true });
+  }
+
   function captureSelection() {
     const reader = current;
-    if (!reader || !live(reader) || $('#annotation-dialog').open || reader.navigating) return;
+    if (!reader || !live(reader) || $('#annotation-dialog').open || reader.navigating) {
+      hidePopover();
+      return;
+    }
     reader.selection = null;
+    hidePopover();
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.rangeCount === 1) {
       const range = selection.getRangeAt(0);
@@ -577,13 +625,24 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
       if (start !== null && end !== null && end > start && end - start <= 4000) {
         const quote = reader.blocks.filter((block) => block.start < end && block.end > start)
           .map((block) => block.text.slice(Math.max(0, start - block.start), Math.min(block.text.length, end - block.start))).join('');
-        if (quote.length === end - start && quote.trim()) reader.selection = { version: reader.version, start, end, quote };
+        if (quote.length === end - start && quote.trim()) {
+          reader.selection = { version: reader.version, start, end, quote };
+          // selectionchange also fires mid-drag; only surface the popover on
+          // a settled (non-collapsed) selection a beat after the drag ends.
+          if (!popoverTimer) {
+            popoverTimer = setTimeout(() => {
+              popoverTimer = null;
+              const settled = window.getSelection();
+              if (reader.selection && settled && !settled.isCollapsed && live(reader)) showPopover(reader, reader.selection);
+            }, 120);
+          }
+        }
       }
       if (start !== null && end !== null && end - start > 4000) reader.hint.textContent = '一次最多选择 4000 个字符，请缩小选文范围。';
     }
     reader.annotateButton.disabled = !reader.selection;
     reader.askButton.disabled = !reader.selection;
-    if (reader.selection) reader.hint.textContent = `已选 ${reader.selection.end - reader.selection.start} 个字符 · 点击“选文批注”保存高亮或笔记。`;
+    if (reader.selection) reader.hint.textContent = `已选 ${reader.selection.end - reader.selection.start} 个字符 · 可用选区旁的按钮高亮或提问。`;
     else if (!selection || selection.isCollapsed) {
       reader.hint.textContent = reader.anchor ? '蓝色底纹为本次引用；选文可添加私人批注。' : '选中文字后，可添加高亮或笔记；仅自己可见。';
       if (reader.highlightsPending) {
@@ -737,5 +796,10 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     }
   });
   document.addEventListener('selectionchange', captureSelection);
+  // A click outside the popover (e.g. collapsing the selection) closes it;
+  // buttons inside run first because hidePopover fires on the next tick.
+  document.addEventListener('pointerdown', (event) => {
+    if (popover && !popover.contains(event.target)) hidePopover();
+  });
   return { open, reset, preserveForConversation, isFocused: () => focused };
 }
