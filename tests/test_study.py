@@ -96,6 +96,36 @@ class DocumentTests(unittest.TestCase):
         self.assertTrue(all(len(body) > 20 for body in bodies), bodies)
         self.assertTrue(any("民法调整平等主体" in body for body in bodies))
 
+    def test_toc_block_dropped_and_pages_harvested(self):
+        # A printed TOC (title + page digits, any spacing) is dropped from the
+        # body, its titles become the section skeleton, and pages ride along.
+        toc = "\n\n".join([
+            "目录",
+            "第一编 总论",
+            "第一章 民法概述              1",
+            "第一节 民法的概念            1",
+            "第二节 民法的沿革            3",
+            "第三节 民法的调整对象        9",
+            "第二章 民事法律关系         21",
+            "第一节 民事法律关系概述     21",
+            "第二节 民事法律关系的要素   25",
+        ])
+        body = ("第一章 民法概述\n\n" + "民法调整平等主体之间的关系。\n\n" * 8
+                + "第一节 民法的概念\n\n" + "概念是思维的基本形式。\n\n" * 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text(toc + "\n\n" + body, encoding="utf-8")
+            sections = parse_document(path, "book.md")
+        joined = "\n".join(section["text"] for section in sections)
+        self.assertNotIn("民法的调整对象        9", joined)  # TOC lines dropped
+        labels = [section["section"] for section in sections]
+        self.assertTrue(any("第一章民法概述" in label for label in labels), labels)
+        # The body heading (no page digits) resolves to the TOC page number.
+        first = next(section for section in sections if "概念是思维" in section["text"])
+        self.assertEqual(first["page"], 1)
+        chunks = split_sections(sections)
+        self.assertTrue(all(chunk["page"] is not None for chunk in chunks if "概念是思维" in chunk["text"]))
+
     def test_image_only_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "scan.md"

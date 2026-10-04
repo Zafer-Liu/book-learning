@@ -640,9 +640,10 @@ function citationButton(label, references, message) {
     return button;
   }
   const button = element('button', 'citation', `[${label}]`);
+  const pageNote = reference.page ? ` · 第 ${reference.page} 页` : '';
   button.title = reference.book_title
-    ? `${reference.book_title} · ${reference.section} · 段落 ${reference.ordinal}`
-    : `${reference.section} · 段落 ${reference.ordinal}`;
+    ? `${reference.book_title} · ${reference.section}${pageNote} · 段落 ${reference.ordinal}`
+    : `${reference.section}${pageNote} · 段落 ${reference.ordinal}`;
   const bookId = reference.book_id || state.book.id;
   action(button, 'click', () => showEvidence(bookId, reference, message));
   return button;

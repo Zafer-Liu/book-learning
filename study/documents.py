@@ -13,7 +13,9 @@ MAX_CHUNKS = 10_000
 # invalidates conversations) when it sees a different one.
 #   2 — self-closing fences, OCR-spaced labels, title-section merging,
 #       sentence-boundary chunk tails.
-PARSER_VERSION = 2
+#   3 — printed-TOC harvesting: TOC blocks dropped from the body, titles
+#       form the heading skeleton, printed page numbers attached.
+PARSER_VERSION = 3
 
 _DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 _W = "{" + _DOCX_NS["w"] + "}"
@@ -30,6 +32,102 @@ def _squeeze(text):
 # including the full-width spacing variant. Applied to headings AND body
 # text that came from OCR exports.
 _SPACED_CJK = re.compile(rf"(?<=[{_CJK}]) (?=[{_CJK}])")
+
+# --- Table-of-contents awareness -------------------------------------
+# Textbook exports almost always carry a TOC page before the body. It is the
+# authoritative structure (titles + printed page numbers), so we (a) drop it
+# from the indexed body — a TOC page pollutes retrieval — and (b) use its
+# entries as a heading skeleton with page numbers no OCR body line can offer.
+
+_TOC_TITLE = re.compile(rf"^\s*第{_NUMBER}?(?:分编|[编章节篇部分])|"
+                        rf"^\s*{_NUMBER}\s*[、．.]|"
+                        rf"^\s*\d{{1,2}}(?:[．.]\d{{1,2}}){{0,2}}\s+")
+
+
+def _toc_normalize(text: str) -> str:
+    """Fold a title for matching: drop OCR spaces, dots and page digits."""
+    text = _SPACED_CJK.sub("", text)
+    return re.sub(r"[\s.·…·]+\(?\d{1,4}\)?\s*$", "", text).strip()
+
+
+def _toc_level(title: str) -> int:
+    if re.match(rf"^第{_NUMBER}[编篇]", title):
+        return 1
+    if re.match(rf"^第{_NUMBER}[部分]", title):
+        return 2
+    if re.match(rf"^第{_NUMBER}章", title):
+        return 3
+    if re.match(rf"^第{_NUMBER}节", title):
+        return 4
+    if re.match(rf"^{_NUMBER}\s*[、．.]", title):
+        return 5
+    return 6
+
+
+def _toc_candidate(raw: str):
+    """One 'title …… page' line in any spacing flavour, or None."""
+    raw = raw.strip()
+    if not 2 <= len(raw) <= 70:
+        return None
+    match = re.search(r"[\s.·…]*\(?(\d{1,4})\)?\s*$", raw)
+    if not match or match.start() == 0:
+        return None
+    title = _toc_normalize(raw)
+    if not title or len(title) > 60 or re.search(r"[。！？；，：/]", title):
+        return None
+    if len(re.sub(r"[\W_]+", "", title)) < 4:
+        return None
+    return title, int(match.group(1))
+
+
+def _extract_toc(lines):
+    """Harvest the book's title→page skeleton.
+
+    Two sources:
+    1. Printed TOC blocks — a cluster of 6+ "title … page" candidates within
+       a 5-line sliding window (blank/junk lines tolerated between them).
+       The whole cluster span is dropped from the indexed body.
+    2. Scattered running headers ("第一节 宪法实施    319" at page tops) —
+       kept in the body but collected as entries when frequent enough, so
+       real body headings (which carry no page digits) resolve to pages.
+
+    Returns (entries, spans): entries map normalized titles to (level, page).
+    """
+    count = len(lines)
+    candidates = []
+    for i in range(count):
+        found = _toc_candidate(lines[i])
+        if found:
+            candidates.append((i, found[0], found[1]))
+
+    entries, spans = {}, []
+    cluster = []
+
+    def emit(cluster_items, drop):
+        if len(cluster_items) < 6:
+            return
+        if drop:
+            spans.append((cluster_items[0][0], cluster_items[-1][0] + 1))
+        for _, title, page in cluster_items:
+            if title not in entries:
+                entries[title] = (_toc_level(title), page)
+
+    for item in candidates:
+        if cluster and item[0] - cluster[-1][0] > 5:
+            emit(cluster, drop=True)
+            cluster = []
+        cluster.append(item)
+    emit(cluster, drop=True)
+
+    # Running-header harvest: structural titles with page digits scattered
+    # through the text (never a TOC cluster — those were consumed above).
+    headers = [(i, t, p) for i, t, p in candidates
+               if _TOC_TITLE.match(t) and not any(s <= i < e for s, e in spans)]
+    if len(headers) >= 10:
+        for _, title, page in headers:
+            if title not in entries:
+                entries[title] = (_toc_level(title), page)
+    return entries, spans
 
 
 def _dehyphenate(lines):
@@ -167,31 +265,33 @@ def parse_document(path: Path, filename: str) -> list[dict]:
     if suffix == ".txt":
         return [{"text": text.strip(), "section": "正文", "page": None}]
 
+    all_lines = text.splitlines()
+    # The printed TOC is the authoritative skeleton: capture its entries
+    # (title -> level, page) and drop its line spans from the body.
+    toc_entries, toc_spans = _extract_toc(all_lines)
+    in_toc = [False] * len(all_lines)
+    for start, end in toc_spans:
+        for k in range(start, end):
+            in_toc[k] = True
     sections, headings, buffer = [], [], []
     label = "正文"
+    page_hint = None
     fence = None
-    lines = text.splitlines()
+    lines = all_lines
     index = 0
 
     def flush():
         body = "\n".join(buffer).strip()
         if body:
-            sections.append({"text": body, "section": label, "page": None})
+            sections.append({"text": body, "section": label, "page": page_hint[0] if page_hint else None})
         buffer.clear()
-
-    # Titles repeat as the first body line of their own section; a title-only
-    # section (heading followed directly by another heading) is merged into
-    # the next one instead of becoming an empty retrieval fragment.
-    def flush_with_pending(pending_title):
-        body = "\n".join(buffer).strip()
-        if body:
-            sections.append({"text": body, "section": label, "page": None})
-            buffer.clear()
-        elif pending_title is not None and buffer:
-            buffer.clear()
 
     while index < len(lines):
         line = lines[index]
+        # Printed-TOC pages never enter the indexed body.
+        if in_toc[index]:
+            index += 1
+            continue
         marker = re.match(r"^\s{0,3}(`{3,}|~{3,})(.*)$", line)
         if marker and not fence:
             token, rest = marker.group(1), marker.group(2).strip()
@@ -220,8 +320,21 @@ def parse_document(path: Path, filename: str) -> list[dict]:
             if underline:
                 level = 1 if underline.group(1)[0] == "=" else 2
                 title, skip = _SPACED_CJK.sub("", line.strip()), 2
+        if not level and not fence and toc_entries and line.strip() and len(line.strip()) <= 60:
+            # TOC skeleton: a body line whose normalized form matches a TOC
+            # entry is a heading even without # markers — with its printed
+            # page number attached. Lines that themselves end in a page
+            # number are running headers, not headings.
+            stripped = line.strip()
+            if not re.search(r"\d{1,4}\s*$", stripped):
+                candidate = _toc_normalize(stripped)
+                if candidate in toc_entries and not re.search(r"[。！？；，]", candidate):
+                    entry_level, entry_page = toc_entries[candidate]
+                    level, title = entry_level, candidate
+                    page_hint = (entry_page,)
         if level:
             flush()
+            page_hint = (toc_entries.get(title, (0, None))[1],) if toc_entries and title in toc_entries else page_hint
             while headings and headings[-1][0] >= level:
                 headings.pop()
             headings.append((level, title[:180]))
