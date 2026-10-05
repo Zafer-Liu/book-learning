@@ -296,6 +296,13 @@ def create_app(test_config=None):
         if name not in {"app.js", "reader.js", "styles.css", "mermaid.min.js", "share.html"}:
             abort(404)
         response = send_from_directory(ROOT / "web", name)
+        # Windows hosts may map .js/.css to text/plain via the registry, which
+        # makes browsers refuse to execute the scripts; pin the MIME types.
+        asset_mime = {".js": "application/javascript; charset=utf-8",
+                      ".css": "text/css; charset=utf-8"}
+        suffix = "." + name.rsplit(".", 1)[-1].lower()
+        if suffix in asset_mime:
+            response.headers["Content-Type"] = asset_mime[suffix]
         response.headers["Cache-Control"] = "no-cache"
         return response
 

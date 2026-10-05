@@ -29,14 +29,14 @@
         <button id="auth-toggle" class="text-button" type="button" hidden>还没有账户？创建书架</button>
         <p class="auth-note">教材存储在服务端，按账户隔离。提问时，相关原文片段会发送给部署者配置的模型服务；配置向量服务后，索引时也会发送教材分块。当前不提供邮件验证和自助密码找回，请妥善保管密码。</p>
         <button id="demo-toggle" type="button" class="text-button demo-toggle">还没账户？先在线体验内置教材 →</button>
-        <section id="demo-box" class="demo-box" hidden>
-          <h3>在线体验</h3>
-          <p class="muted">选一本内置教材提问，回答同样带教材引用。体验通道每 IP 每小时 6 问，对话不保存。</p>
-          <label class="select-field demo-book-field">体验教材<select id="demo-book"><option value="">正在读取内置教材…</option></select></label>
-          <div id="demo-messages" class="demo-messages" aria-live="polite"></div>
-          <form id="demo-form" class="demo-form"><label class="sr-only" for="demo-question">体验问题</label><textarea id="demo-question" rows="2" maxlength="1000" placeholder="例如：民法总则中法人分为哪几类？"></textarea><button type="submit" class="send-button" id="demo-send">提问</button></form>
-        </section>
       </form>
+      <section id="demo-box" class="demo-box" hidden>
+        <h3>在线体验</h3>
+        <p class="muted">选一本内置教材提问，回答同样带教材引用。体验通道每 IP 每小时 6 问，对话不保存。</p>
+        <label class="select-field demo-book-field">体验教材<select id="demo-book"><option value="">正在读取内置教材…</option></select></label>
+        <div id="demo-messages" class="demo-messages" aria-live="polite"></div>
+        <form id="demo-form" class="demo-form"><label class="sr-only" for="demo-question">体验问题</label><textarea id="demo-question" rows="2" maxlength="1000" placeholder="例如：民法总则中法人分为哪几类？"></textarea><button type="submit" class="send-button" id="demo-send">提问</button></form>
+      </section>
     </div>
   </section>
 
