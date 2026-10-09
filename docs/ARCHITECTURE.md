@@ -2,7 +2,7 @@
 
 [文档首页](README.md) · [开发说明](DEVELOPMENT.md) · [配置参考](CONFIGURATION.md) · [维护说明](MAINTENANCE.md) · [进展记录](PROGRESS.md)
 
-源码核对日期：2026-09-19。本文描述当前实现，不是规划中的目标架构。
+源码核对日期：2026-10-04。本文描述当前实现，不是规划中的目标架构。
 
 ## 1. 定位与系统边界
 
@@ -48,6 +48,7 @@ Railway 使用 Dockerfile 启动单个 Gunicorn worker，线程类型为 gthread
 | [builtin_books/](../builtin_books/) | 随镜像交付的共享教材源文件 |
 | [tests/test_study.py](../tests/test_study.py) | 解析、检索、模型回退、工具循环、隔离、迁移及反馈回归用例 |
 | [tests/test_reader.py](../tests/test_reader.py) | 规范全文、阅读/批注 API 与旧库迁移用例 |
+| [tests/test_review.py](../tests/test_review.py) | 自测记录与到期复习 API 回归用例 |
 
 ## 3. 数据模型与持久化
 
@@ -71,8 +72,10 @@ Railway 使用 Dockerfile 启动单个 Gunicorn worker，线程类型为 gthread
 | `chunks_fts` | jieba 分词后的 FTS5 虚表；rowid 对应 chunk ID |
 | `conversations` | 按用户和书保存的学习会话 |
 | `messages` | 角色、正文、模式及完整 JSON `payload`；引用、结构化答案和检索元数据在 payload 内 |
+| `quiz_attempts` | 每账户每道自测题的作答、自评及下次复习时间；随消息和书级联删除 |
 | `test_codes` | 测试码与永久绑定记录；不随环境变量删除而撤销 |
 | `annotations` | 每账户每书的私人批注：正文版本哈希、UTF-16 起止、原文摘录、笔记与颜色；随书/账户级联删除 |
+| `reading_progress` | 每账户每书的正文版本、UTF-16 续读位置与末尾状态；随书/账户级联删除 |
 | `feedback` | 每条助手消息当前的一次评价，含可选原因 |
 | `feedback_archive` | 追加式评价事件，包括改评、撤销及问题前 120 字 |
 | `feedback_stats` | 已完成的三日周期计数及 Top 10 差评原因/问题 |

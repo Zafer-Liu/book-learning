@@ -1,5 +1,5 @@
 // Source-backed reader. All positions use JavaScript's UTF-16 string offsets.
-export function createReader({ api, element, findBook, getEpoch, panel, toast, onAsk }) {
+export function createReader({ api, element, findBook, getEpoch, getAuth, panel, toast, onAsk, onQuiz, onProgress }) {
   const $ = (selector) => document.querySelector(selector);
   let current = null;
   let editor = null;
@@ -26,6 +26,33 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
   let nativeOwned = false;
   let nativeRequest = null;
   let nativeExiting = false;
+  const typeSteps = [15, 17, 19, 21];
+  let typeStep = 1;
+  try {
+    const saved = Number(localStorage.getItem('study.reader.fontSize'));
+    if (typeSteps.includes(saved)) typeStep = typeSteps.indexOf(saved);
+  } catch { /* Reading remains available when storage is blocked. */ }
+
+  function updateType(reader) {
+    reader.shell.style.setProperty('--reader-font-size', `${typeSteps[typeStep]}px`);
+    reader.typeValue.textContent = `${typeSteps[typeStep]}px`;
+    reader.typeSmaller.disabled = typeStep === 0;
+    reader.typeLarger.disabled = typeStep === typeSteps.length - 1;
+  }
+
+  function changeType(reader, delta) {
+    typeStep = Math.max(0, Math.min(typeSteps.length - 1, typeStep + delta));
+    updateType(reader);
+    try { localStorage.setItem('study.reader.fontSize', String(typeSteps[typeStep])); }
+    catch { /* The setting still works for this visit. */ }
+  }
+
+  async function startOver(reader) {
+    reader.restoring = true;
+    const data = await navigate(reader, { at: 0 });
+    reader.restoring = false;
+    if (data && live(reader)) savePosition(reader, 0, false, true);
+  }
 
   function endDrag() {
     if (drag && dragHandle.hasPointerCapture(drag.id)) dragHandle.releasePointerCapture(drag.id);
@@ -111,7 +138,8 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     $('#workspace').classList.toggle('reader-fullscreen', expanded);
     $('#reader-focus').setAttribute('aria-pressed', String(expanded));
     $('#reader-focus').textContent = expanded ? '退出全屏' : '展开阅读';
-    setChatMinimized(false);
+    // Reading starts with an unobstructed page; the tutor opens on demand.
+    setChatMinimized(expanded);
     if (expanded) {
       panel('evidence');
       resizeFocus();
@@ -141,7 +169,10 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
   }
 
   function reset() {
+    if (current && !current.restoring) rememberPosition(current, true);
     if (current?.frame) cancelAnimationFrame(current.frame);
+    if (current?.positionTimer) clearTimeout(current.positionTimer);
+    if (current?.syncTimer) clearTimeout(current.syncTimer);
     current = null;
     editor = null;
     hidePopover();
@@ -161,15 +192,19 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     const old = current;
     const scrollTop = old.scroll.scrollTop;
     if (old.frame) cancelAnimationFrame(old.frame);
-    const reader = { ...old, epoch: getEpoch(), frame: null, loading: null, navigating: false,
+    if (old.positionTimer) clearTimeout(old.positionTimer);
+    if (old.syncTimer) clearTimeout(old.syncTimer);
+    const reader = { ...old, epoch: getEpoch(), frame: null, positionTimer: null, syncTimer: null,
+      loading: null, navigating: false,
       notesLoading: false, selection: null, highlightsPending: false };
     current = reader;
     mount(reader);
     reader.tocSelect.replaceChildren(...reader.toc.map((item) => new Option(item.title, item.start)));
     reader.stream.replaceChildren(...reader.blocks.map((block) => blockNode(reader, block)));
-    reader.scroll.scrollTop = scrollTop;
+    setScrollTop(reader, scrollTop);
     updateEdges(reader);
     updateProgress(reader);
+    if (!reader.restoring) rememberPosition(reader);
     if (old.navigating || !reader.version) navigate(reader, old.target || {});
     loadNotes(reader);
     return true;
@@ -180,13 +215,23 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     const visible = [...reader.stream.children].find((node) => node.getBoundingClientRect().bottom > top);
     const oldTop = visible?.getBoundingClientRect().top;
     change();
-    if (visible?.isConnected) reader.scroll.scrollTop += visible.getBoundingClientRect().top - oldTop;
+    if (visible?.isConnected) setScrollTop(reader, reader.scroll.scrollTop + visible.getBoundingClientRect().top - oldTop);
+  }
+
+  function setScrollTop(reader, top) {
+    // Programmatic navigation must finish before notes refresh or scroll
+    // tracking runs; CSS smooth scrolling can otherwise cancel the jump.
+    const previous = reader.scroll.style.scrollBehavior;
+    reader.scroll.style.scrollBehavior = 'auto';
+    reader.scroll.scrollTop = top;
+    reader.scroll.style.scrollBehavior = previous;
   }
 
   function mount(reader) {
     $('.evidence').classList.add('reader-open');
     $('#reader-focus').hidden = false;
     const shell = element('div', 'reader-shell');
+    reader.shell = shell;
     const tools = element('div', 'reader-tools');
     tools.append(element('h3', 'reader-book-title', reader.title));
     const directory = element('label', 'reader-directory', '目录');
@@ -217,8 +262,19 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     reader.askButton.disabled = true;
     reader.askButton.addEventListener('pointerdown', (event) => event.preventDefault());
     actions.append(reader.notesButton, reader.annotateButton, reader.askButton,
-                   button('从头阅读', () => navigate(reader, {}), 'text-button'));
+                   button('从头阅读', () => startOver(reader), 'text-button'));
+    const typeControls = element('div', 'reader-type-controls');
+    typeControls.setAttribute('role', 'group');
+    typeControls.setAttribute('aria-label', '正文字号');
+    reader.typeSmaller = button('A−', () => changeType(reader, -1), 'text-button');
+    reader.typeSmaller.setAttribute('aria-label', '缩小正文字号');
+    reader.typeValue = element('span', 'reader-type-value');
+    reader.typeLarger = button('A+', () => changeType(reader, 1), 'text-button');
+    reader.typeLarger.setAttribute('aria-label', '放大正文字号');
+    typeControls.append(reader.typeSmaller, reader.typeValue, reader.typeLarger);
+    actions.append(typeControls);
     tools.append(actions);
+    updateType(reader);
     reader.hint = element('p', 'reader-hint', '选中文字后，可添加高亮或笔记；仅自己可见。');
     tools.append(reader.hint);
     reader.error = element('div', 'reader-error');
@@ -247,7 +303,14 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('pointerup', onPointerUp, true);
     document.addEventListener('pointercancel', () => { pointerDown = false; });
-    reader.progress = element('p', 'reader-progress', '正在读取正文…');
+    reader.progress = element('div', 'reader-progress');
+    reader.progressText = element('span', '', '正在读取正文…');
+    reader.syncStatus = element('span', 'reader-sync-status');
+    reader.syncStatus.setAttribute('aria-live', 'polite');
+    reader.progress.append(reader.progressText, reader.syncStatus, button('自测本节', () => {
+      if (focused) setChatMinimized(false);
+      onQuiz?.({ section: passageSection(reader) });
+    }, 'text-button'));
     reader.scroll.addEventListener('scroll', () => {
       hidePopover();
       if (reader.frame) return;
@@ -256,9 +319,21 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
         if (!live(reader)) return;
         updateProgress(reader);
         const stamp = Date.now();
-        if (!reader.positionSavedAt || stamp - reader.positionSavedAt > 3000) {
-          reader.positionSavedAt = stamp;
-          rememberPosition(reader);
+        if (!reader.restoring) {
+          const elapsed = stamp - (reader.positionSavedAt || 0);
+          if (elapsed >= 3000) {
+            if (reader.positionTimer) clearTimeout(reader.positionTimer);
+            reader.positionTimer = null;
+            reader.positionSavedAt = stamp;
+            rememberPosition(reader);
+          } else if (!reader.positionTimer) {
+            reader.positionTimer = setTimeout(() => {
+              reader.positionTimer = null;
+              if (!live(reader) || reader.restoring) return;
+              reader.positionSavedAt = Date.now();
+              rememberPosition(reader);
+            }, 3000 - elapsed);
+          }
         }
         if (reader.navigating || reader.loading || !reader.blocks.length || reader.selection || $('#annotation-dialog').open) return;
         const box = reader.scroll;
@@ -290,9 +365,34 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     reader.scroll.setAttribute('aria-busy', String(reader.navigating || Boolean(reader.loading)));
   }
 
+  function visibleOffset(reader, article, block) {
+    const content = article?.querySelector('.reader-text');
+    if (!content) return block.start;
+    const rect = content.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) return block.start;
+    const top = reader.scroll.getBoundingClientRect().top;
+    const x = Math.min(rect.right - 2, rect.left + 12);
+    const y = Math.max(rect.top + 1, Math.min(top + 24, rect.bottom - 1));
+    const caret = document.caretPositionFromPoint?.(x, y);
+    const range = caret ? null : document.caretRangeFromPoint?.(x, y);
+    const target = caret?.offsetNode || range?.startContainer;
+    const offset = caret?.offset ?? range?.startOffset;
+    if (!target || target.nodeType !== Node.TEXT_NODE || !content.contains(target)) return block.start;
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+    let local = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node === target) { local += offset; break; }
+      local += node.length;
+    }
+    local = Math.max(0, Math.min(local, block.text.length - 1));
+    const code = block.text.charCodeAt(local);
+    if (local && code >= 0xDC00 && code <= 0xDFFF) local -= 1;
+    return block.start + local;
+  }
+
   function updateProgress(reader) {
     if (!reader.blocks.length) {
-      reader.progress.textContent = '全文阅读不调用模型；OCR 错误请对照源文件。';
+      reader.progressText.textContent = '全文阅读不调用模型；OCR 错误请对照源文件。';
       return;
     }
     const top = reader.scroll.getBoundingClientRect().top;
@@ -300,7 +400,8 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     const block = reader.blocks.find((item) => item.index === Number(node?.dataset.index)) || reader.blocks[0];
     const atEnd = reader.blocks.at(-1).index === reader.total - 1
       && reader.scroll.scrollHeight - reader.scroll.scrollTop - reader.scroll.clientHeight < 4;
-    reader.progress.textContent = `正文位置 ${atEnd ? 100 : Math.min(99, Math.floor(block.start / reader.length * 100))}% · OCR 原文，非原书页码`;
+    const at = atEnd ? reader.length : visibleOffset(reader, node, block);
+    reader.progressText.textContent = `正文位置 ${atEnd ? 100 : Math.min(99, Math.floor(at / reader.length * 100))}% · OCR 原文，非原书页码`;
     const section = reader.toc.filter((item) => item.start <= block.start).at(-1);
     if (section) reader.tocSelect.value = String(section.start);
   }
@@ -315,24 +416,80 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     return section?.title || '';
   }
 
-  function rememberPosition(reader) {
-    // Local-only reading position per book; restored on the next open.
+  function positionKey(reader) {
+    return `study.read.${reader.userId}.${reader.bookId}`;
+  }
+
+  function savePosition(reader, start, finished = false, force = false) {
+    if (!reader.userId || !reader.version || !reader.length) return;
+    const savedAt = new Date().toISOString();
+    const progress = { version: reader.version, start, length: reader.length, finished,
+      percent: finished ? 100 : Math.min(99, Math.floor(start * 100 / reader.length)), updated_at: savedAt };
+    let localSaved = false;
+    try {
+      localStorage.setItem(positionKey(reader), JSON.stringify({ ...progress, savedAt }));
+      localSaved = true;
+    } catch { /* Reading still works if storage is unavailable. */ }
+    onProgress?.({ bookId: reader.bookId, userId: reader.userId, progress });
+    const version = reader.version;
+    const signature = `${version}:${start}:${Number(finished)}`;
+    reader.latestPositionSignature = signature;
+    if (signature === reader.lastRemotePosition) {
+      if (live(reader)) reader.syncStatus.textContent = '已同步';
+      return;
+    }
+    const stamp = Date.now();
+    if (!force && stamp - (reader.remoteSavedAt || 0) < 12000) {
+      if (live(reader)) reader.syncStatus.textContent = '待同步';
+      if (!reader.syncTimer) reader.syncTimer = setTimeout(() => {
+        reader.syncTimer = null;
+        if (live(reader) && !reader.restoring) rememberPosition(reader, true);
+      }, 12000 - (stamp - reader.remoteSavedAt));
+      return;
+    }
+    if (reader.syncTimer) clearTimeout(reader.syncTimer);
+    reader.syncTimer = null;
+    reader.remoteSavedAt = stamp;
+    if (live(reader)) reader.syncStatus.textContent = '同步中…';
+    const save = async () => {
+      const response = await fetch(`/api/books/${reader.bookId}/reading-progress`, {
+        method: 'PUT', credentials: 'same-origin', keepalive: true,
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': reader.csrf },
+        body: JSON.stringify({ version, start, finished }),
+      });
+      if (!response.ok) throw new Error('阅读进度保存失败');
+      reader.lastRemotePosition = signature;
+      if (live(reader) && reader.version === version) {
+        reader.syncStatus.textContent = reader.latestPositionSignature === signature ? '已同步' : '待同步';
+      }
+    };
+    reader.saveQueue = (reader.saveQueue || Promise.resolve()).catch(() => {}).then(save);
+    reader.saveQueue.catch(() => {
+      if (live(reader) && reader.latestPositionSignature === signature) {
+        reader.syncStatus.textContent = localSaved ? '仅本机保存' : '保存失败';
+      }
+    });
+  }
+
+  function rememberPosition(reader, force = false) {
     if (!reader.blocks.length || !reader.version) return;
     const top = reader.scroll.getBoundingClientRect().top;
     const node = [...reader.stream.children].find((item) => item.getBoundingClientRect().bottom > top);
     const block = reader.blocks.find((item) => item.index === Number(node?.dataset.index));
     if (!block) return;
-    try {
-      localStorage.setItem(`study.read.${reader.bookId}`,
-        JSON.stringify({ start: block.start, version: reader.version }));
-    } catch { /* storage full or blocked: skip silently */ }
+    const finished = reader.blocks.at(-1).index === reader.total - 1
+      && reader.scroll.scrollHeight - reader.scroll.scrollTop - reader.scroll.clientHeight < 4;
+    savePosition(reader, finished ? reader.blocks.at(-1).start : visibleOffset(reader, node, block), finished, force);
   }
 
   function recallPosition(reader) {
     try {
-      const saved = JSON.parse(localStorage.getItem(`study.read.${reader.bookId}`) || 'null');
-      if (saved && typeof saved.start === 'number') return saved;
-    } catch { /* ignore malformed entries */ }
+      const scoped = localStorage.getItem(positionKey(reader));
+      const legacy = reader.legacyLocalAllowed ? localStorage.getItem(`study.read.${reader.bookId}`) : null;
+      const saved = JSON.parse(scoped || legacy || 'null');
+      if (saved && Number.isSafeInteger(saved.start) && saved.start >= 0
+        && typeof saved.version === 'string') return saved;
+    } catch { /* Ignore malformed entries. */ }
     return null;
   }
 
@@ -418,7 +575,7 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
       const candidate = range.getBoundingClientRect();
       if (candidate.height) rect = candidate;
     }
-    reader.scroll.scrollTop += rect.top - reader.scroll.getBoundingClientRect().top - 24;
+    setScrollTop(reader, reader.scroll.scrollTop + rect.top - reader.scroll.getBoundingClientRect().top - 24);
     reader.scroll.focus({ preventScroll: true });
     updateProgress(reader);
   }
@@ -448,12 +605,12 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
       reader.errors = {};
       reader.tocSelect.replaceChildren(...data.toc.map((item) => new Option(item.title, item.start)));
       reader.stream.replaceChildren(...data.blocks.map((block) => blockNode(reader, block)));
-      reader.scroll.scrollTop = 0;
+      setScrollTop(reader, 0);
       reader.hint.textContent = data.anchor ? '蓝色底纹为本次引用；可上下连续阅读，选文添加私人批注。' : '选中文字后，可添加高亮或笔记；仅自己可见。';
       renderNotes(reader);
-      const saved = params.anchor ? null : recallPosition(reader);
-      const target = params.at ?? data.anchor?.start ?? saved?.start ?? 0;
+      const target = params.at ?? data.anchor?.start ?? 0;
       requestAnimationFrame(() => { if (live(reader) && navigation === reader.navigation) jumpTo(reader, target); });
+      return data;
     } catch (error) {
       if (!live(reader) || navigation !== reader.navigation) return;
       reader.error.replaceChildren(element('p', '', error.message || '正文读取失败。'),
@@ -743,14 +900,38 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
       return;
     }
     reset();
+    const auth = getAuth();
     const reader = { bookId, title: findBook(bookId)?.title || bookId, epoch: getEpoch(), navigation: 0, version: null, blocks: [], annotations: [],
       toc: [], anchor: null, total: 0, length: 0, notesOpen: notes, notesLoaded: false, notesLoading: false,
-      errors: {}, loading: null, navigating: false, selection: null };
+      errors: {}, loading: null, navigating: false, selection: null, restoring: true,
+      userId: auth.userId, csrf: auth.csrf, legacyLocalAllowed: !findBook(bookId)?.builtin };
     current = reader;
     mount(reader);
     if (expanded) setFocus(true);
     panel('evidence');
-    await navigate(reader, anchor ? { anchor } : {});
+    const local = anchor ? null : recallPosition(reader);
+    const data = await navigate(reader, anchor ? { anchor } : {});
+    if (data && !anchor && live(reader)) {
+      const remote = data.progress;
+      const valid = (item) => item?.version === data.version && Number.isSafeInteger(item.start)
+        && item.start >= 0 && item.start < data.length && (!item.length || item.length === data.length);
+      const remoteValid = valid(remote);
+      const localValid = valid(local);
+      const localNewer = localValid && (!remoteValid
+        || Date.parse(local.savedAt || '') > Date.parse(remote.updated_at || ''));
+      const saved = localNewer ? local : remoteValid ? remote : null;
+      if (saved?.start > 0) await navigate(reader, { at: saved.start, version: data.version });
+      if (saved?.finished && live(reader)) requestAnimationFrame(() => {
+        if (live(reader)) { setScrollTop(reader, reader.scroll.scrollHeight); updateProgress(reader); }
+      });
+      if (live(reader) && localNewer) savePosition(reader, saved.start, Boolean(saved.finished), true);
+      else if (live(reader) && remote && !remoteValid) savePosition(reader, 0, false, true);
+      else if (remoteValid) {
+        reader.lastRemotePosition = `${remote.version}:${remote.start}:${Number(remote.finished)}`;
+        reader.syncStatus.textContent = '已同步';
+      }
+    }
+    reader.restoring = false;
     if (live(reader)) await loadNotes(reader);
   }
 
@@ -797,6 +978,10 @@ export function createReader({ api, element, findBook, getEpoch, panel, toast, o
     event.preventDefault();
     setFocus(false);
   });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && current && !current.restoring) rememberPosition(current, true);
+  });
+  window.addEventListener('pagehide', () => { if (current && !current.restoring) rememberPosition(current, true); });
   window.addEventListener('resize', resizeFocus);
   window.visualViewport?.addEventListener('resize', resizeFocus);
   window.visualViewport?.addEventListener('scroll', resizeFocus);

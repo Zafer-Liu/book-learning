@@ -65,7 +65,7 @@ Copy-Item .env.example .env
 | `POST /api/auth/logout` | 清除会话，返回 ok |
 | `GET /api/config` | 模型配置状态、上传限制、格式；不是接口连通性测试 |
 | `GET /api/logs` | 当前可见的最近日志，读取时触发过期清理 |
-| `GET /api/books` | 可访问书籍列表，包含 builtin 标记 |
+| `GET /api/books` | 可访问书籍列表，包含 builtin 标记及每书到期复习数 |
 | `POST /api/books` | multipart `file`，可选 `title`；202 返回 book 并排队索引 |
 | `GET /api/books/{book_id}` | book 及 sections |
 | `DELETE /api/books/{book_id}` | 删除自有教材，内置书禁止 |
@@ -74,17 +74,22 @@ Copy-Item .env.example .env
 | `GET /api/books/{book_id}/chunks/{chunk_id}` | chunk、prev、next（邻块无则 null）、window（引用段前 3 后 6 的初始阅读窗口） |
 | `GET /api/books/{book_id}/chunks?anchor=&direction=before\|after&count=` | 按 anchor 邻近加载 1–20 块，按阅读顺序返回 |
 | `POST /api/books/{book_id}/chunks/{chunk_id}/match` | `{"question":"问题"}`；返回句子 ranges，失败可返回空数组 |
-| `GET /api/books/{book_id}/reader` | 正文阅读块窗口；`start`/`count`、`anchor`（chunk 定位）、`at`、`version` 定位参数互斥，返回 version、blocks、toc、total、length、anchor |
+| `GET /api/books/{book_id}/reader` | 正文阅读块窗口；`start`/`count`、`anchor`（chunk 定位）、`at`、`version` 定位参数互斥，返回 version、blocks、toc、total、length、anchor 和本账户 progress |
+| `GET /api/books/{book_id}/reading-progress` | 本账户本书的阅读位置；无记录时 progress 为 null |
+| `PUT /api/books/{book_id}/reading-progress` | `{"version","start","finished"}`；校验正文版本及 UTF-16 位置后保存账户级进度 |
 | `GET /api/books/{book_id}/annotations` | 当前用户在本书的批注列表，按正文位置排序 |
 | `POST /api/books/{book_id}/annotations` | `{"version","start","end","quote","note","color"}`；摘录与正文全等校验，201 返回 annotation |
 | `PATCH /api/books/{book_id}/annotations/{annotation_id}` | 仅允许修改 `note`、`color` |
 | `DELETE /api/books/{book_id}/annotations/{annotation_id}` | 删除本人批注，返回 ok |
 | `GET /api/books/{book_id}/conversations` | 当前用户在本书的会话列表 |
 | `POST /api/books/{book_id}/conversations` | 创建会话，201 返回 conversation |
-| `GET /api/books/{book_id}/conversations/{conversation_id}` | conversation 和 messages；助手历史包含当前 feedback |
+| `GET /api/books/{book_id}/conversations/{conversation_id}` | conversation 和 messages；助手历史包含当前 feedback，自测消息还包含当前账户的 quiz_attempts |
 | `DELETE /api/books/{book_id}/conversations/{conversation_id}` | 删除本人的会话及消息 |
 | `POST /api/books/{book_id}/conversations/{conversation_id}/messages` | message、mode、可选 section；返回 SSE |
 | `POST /api/books/{book_id}/conversations/{conversation_id}/messages/{message_id}/feedback` | rating: 1/-1/0、可选 reason；返回 feedback 数值或 null |
+| `PATCH /api/books/{book_id}/conversations/{conversation_id}/messages/{message_id}/quiz/{question_index}` | 保存本人自测题的完整 draft、rating（空串/understood/review），复习提交时可加 `reviewed: true`；返回 attempt、本书 review_due 和全书架 review_due_total |
+| `GET /api/review` | 全书架到期自测题、书名与总数；最多返回前 20 题 |
+| `GET /api/books/{book_id}/review` | 当前账户本书到期的前 20 道自测题和 due_count；答案默认由前端折叠 |
 
 用户名为 3–32 位中文/字母/数字/下划线等受正则允许的字符，唯一性按 casefold 处理；密码长度 10–256。测试码注册与普通注册的优先级见配置及维护文档。
 
@@ -97,6 +102,8 @@ Copy-Item .env.example .env
 match 的 ranges 使用相对于原分块文本的 `[start, end)` 字符区间；前端不得先改写文本再套用区间。关键词来自答案的 `retrieval.terms`，语义高亮则按原问题单独请求。
 
 reader 的所有位置（`start`、`at`、批注起止）都以 UTF-16 代码单元计（`offset_unit: "utf-16"`），不能与码点下标混用。`version` 是规范全文的 SHA-256：定位参数带旧 version 而正文已变化时返回 409；引用 anchor 映射失败也返回 409。批注对象含 id、version、start、end、quote、note、color、created_at、updated_at；quote 必须与正文对应区间全等，创建后仅能改笔记与颜色。
+
+`quiz_attempts` 按账户、回答消息和题号保存最近一次作答与自评，删除会话时随消息级联删除。首次标记“待复习”立即进入队列；复习后仍待复习则次日再练，标记“已掌握”则三天后再练。这个状态是用户自评，不是系统自动判分。所有读写均核对账户、教材、会话和回答消息的归属。
 
 feedback 的 0 是撤销当前评价，但仍写一条归档事件。reason 仅在 -1 时保存，strip 后最多 200 字。历史接口返回当前评价数值，不返回原因；UI 的原因面板只存在于当前 DOM，刷新后不会复原未提交输入。
 
@@ -148,9 +155,9 @@ answer(message=..., user_message=...)
 
 ## 6. 测试与人工验收
 
-### 6.1 开发者自行执行的测试
+### 6.1 回归测试
 
-本项目协作约定：助手默认仅做静态检查，不执行本地构建、类型检查、lint 或测试；以下命令由开发者自行决定运行，不表示本轮已经执行。
+改动后运行完整测试集，并针对所修改的前端交互做浏览器验收：
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
@@ -163,7 +170,7 @@ $env:PYTHONPATH = "."
 .\.venv\Scripts\python.exe tests/test_study.py
 ```
 
-测试目录当前不是可直接按 `tests.test_study` 导入的包，不要假设 `python -m unittest tests.test_study` 可用。当前源码包含 85 个 `test_*` 用例（`test_study.py` 61 个、`test_reader.py` 24 个）；数量是静态清点，不是本轮通过结果。
+测试目录当前不是可直接按 `tests.test_study` 导入的包，不要假设 `python -m unittest tests.test_study` 可用。运行 `unittest discover` 可获取当前用例数和通过情况。
 
 | 测试类 | 主要覆盖 |
 | --- | --- |
@@ -176,6 +183,7 @@ $env:PYTHONPATH = "."
 | `TestCodeTests` | 测试码绑定、重复注册、入口状态、启动播种和旧账户退役 |
 | `ApiKeyAccountTests` | 自带 API Key 注册、更新与使用范围 |
 | `CanonicalTests` / `ReaderApiTests` / `ReaderMigrationTests` | 规范全文与阅读块、阅读/批注 API 的权限与版本语义、旧库批注表迁移 |
+| `ReviewApiTests` | 自测作答持久化、复习排程、账户隔离与删除级联 |
 
 运行前使用隔离环境。`create_app` 会加载 `.env` 并启动内置书播种、索引和汇总；不能仅因 `TESTING=True` 就认定完全离线。应在导入模块前，用显式空环境值覆盖 `.env` 中的主备模型、两组 embedding、测试码等实际配置，或在测试中完整 mock；不要让回归测试消耗生产额度。qa 模式的 SSE 测试尤其要 patch `agent_stream`（或 `generate` 与 `generate_stream` 两者），否则本地 `.env` 配置了真实模型时会发生真实网络调用。
 

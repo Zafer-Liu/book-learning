@@ -11,6 +11,7 @@ from contextlib import contextmanager
 
 from flask import abort, g, jsonify, request
 
+from .database import public_reading_progress
 from .documents import MAX_CHARS, MAX_CHUNKS, parse_document, split_sections
 
 BLOCK_CHARS = 2400
@@ -252,8 +253,55 @@ def register_reader_routes(app, database, root, book_row, book_lock_for, body, t
             result = {"version": snapshot.version, "blocks": snapshot.window(start, start + count),
                       "total": len(snapshot.blocks), "length": snapshot.length, "toc": snapshot.toc,
                       "anchor": anchor, "offset_unit": "utf-16"}
+            with database.connect() as db:
+                progress_row = db.execute(
+                    "SELECT version,start,text_length,finished,updated_at FROM reading_progress "
+                    "WHERE owner_id=? AND book_id=?", (g.user["id"], book_id)).fetchone()
+            result["progress"] = public_reading_progress(progress_row)
             check_source(path, stamp)
             return jsonify(result)
+
+    @app.get("/api/books/<book_id>/reading-progress")
+    def get_reading_progress(book_id):
+        with database.connect() as db:
+            book_row(db, book_id)
+            row = db.execute(
+                "SELECT version,start,text_length,finished,updated_at FROM reading_progress "
+                "WHERE owner_id=? AND book_id=?", (g.user["id"], book_id)).fetchone()
+        return jsonify(progress=public_reading_progress(row))
+
+    @app.put("/api/books/<book_id>/reading-progress")
+    def save_reading_progress(book_id):
+        data = body()
+        if set(data) != {"version", "start", "finished"}:
+            abort(400, description="阅读进度字段无效。")
+        version = version_value(data["version"])
+        start, finished = data["start"], data["finished"]
+        if type(start) is not int or type(finished) is not bool:
+            abort(400, description="阅读进度无效。")
+        throttle(("reading-progress", g.user["id"]), 480, 3600)
+        with locked_book(book_id) as book:
+            if book["status"] != "ready" or book["category"] == "group":
+                abort(409, description="教材尚不可阅读。")
+            snapshot, path, stamp = cache.get(book, root)
+            if version != snapshot.version:
+                abort(409, description="正文版本已更新，请重新打开阅读器。")
+            snapshot.to_codepoint(start)
+            if start >= snapshot.length or (finished and snapshot.block_index(start) != len(snapshot.blocks) - 1):
+                abort(400, description="阅读进度超出正文范围。")
+            check_source(path, stamp)
+            with database.connect() as db:
+                book_row(db, book_id)
+                db.execute(
+                    "INSERT INTO reading_progress(owner_id,book_id,version,start,text_length,finished,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?) ON CONFLICT(owner_id,book_id) DO UPDATE SET "
+                    "version=excluded.version,start=excluded.start,text_length=excluded.text_length,"
+                    "finished=excluded.finished,updated_at=excluded.updated_at",
+                    (g.user["id"], book_id, version, start, snapshot.length, int(finished), now()))
+                row = db.execute(
+                    "SELECT version,start,text_length,finished,updated_at FROM reading_progress "
+                    "WHERE owner_id=? AND book_id=?", (g.user["id"], book_id)).fetchone()
+        return jsonify(progress=public_reading_progress(row))
 
     @app.get("/api/books/<book_id>/annotations")
     def annotations(book_id):

@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3398?style=flat-square&logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-3.x-3398?style=flat-square)
 ![License](https://img.shields.io/badge/License-GPL--3.0-yellow?style=flat-square)
-![Tests](https://img.shields.io/badge/Tests-114%20passing-success?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-passing-success?style=flat-square)
 
 **Put your textbooks on the shelf — and let every answer lead you back to the original text.**
 
@@ -119,10 +119,10 @@ flowchart LR
 - **Four study modes** — Q&A (model-driven multi-round retrieval), chapter explanation, key-point outlining, self-testing (answers folded by default); retrieval can be narrowed to a section.
 - **Evidence-constrained generation** — as in Diagram 4: answers must stand on this turn's retrieved evidence; otherwise an explicit refusal.
 - **Automatic emphasis** — the model marks key terms, conclusions and numbers with **bold** (the only Markdown token allowed); the client renders it safely with no HTML injection.
-- **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model); select any passage to **ask the tutor about it**, and annotations offer one-click follow-ups.
-- **Agent powers in every mode** — all four modes let the model retrieve and diagram on its own; self-tests accept count (3/5/10) and depth tuning, and every quiz exports to **Anki-compatible CSV cards**.
+- **Annotation reader** — full-text reading, citation-anchored context, three-colour highlights and private notes (never sent to the model); select any passage to **ask the tutor about it**, or start a self-test for the current section.
+- **Self-testing and review** — choose 3/5/10 questions and depth, save answers and self-ratings to your account, review due questions across books from the shelf, then return to the source conversation, with answers initially hidden, and export quizzes to **Anki-compatible CSV cards**. Sampled explanations and outlines show their source coverage before the answer.
 - **Sharing & demo** — any answer can produce a revocable read-only share link; the login page offers a rate-limited, non-persisting **online demo** over the builtin books.
-- **Reading position memory** — per-book reading positions are remembered locally; book headers show conversation/question/annotation stats.
+- **Reading position memory** — per-account positions sync across devices, with a local fallback; the shelf shows where to resume. Book headers show conversation/question/annotation stats.
 - **Compaction + context meter** — as in Diagram 3.
 - **Opt-in web supplement** — appears only when `STUDY_SEARCH_API_KEY` is set (defaults to Zhipu's `web-search-pro` tools API — any ordinary Zhipu key works; a remote MCP is also supported), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
 - **Built-in diagram tool** — when a process, structure or hierarchy is hard to convey in prose, the agent calls `draw_diagram` on its own to attach mermaid flowcharts/mindmaps (max 3 per answer, content bound to the retrieved evidence); they render inline and persist with the answer.

@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -79,6 +80,14 @@ class CanonicalTests(unittest.TestCase):
 
 
 class ReaderApiTests(unittest.TestCase):
+    def test_frontend_assets_have_browser_compatible_mime_types(self):
+        with patch("study.app.ROOT", Path(__file__).resolve().parents[1]):
+            for name in ("app.js", "reader.js", "mermaid.min.js"):
+                with closing(self.a.get(f"/assets/{name}")) as response:
+                    self.assertEqual(response.mimetype, "text/javascript")
+            with closing(self.a.get("/assets/styles.css")) as response:
+                self.assertEqual(response.mimetype, "text/css")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -236,6 +245,33 @@ class ReaderApiTests(unittest.TestCase):
         self.assertEqual(data["anchor"]["start"], utf16(sections[0]["text"]) + 2)
         self.assertEqual(data["toc"][1]["start"], data["anchor"]["start"])
         self.assertEqual(data["blocks"][data["toc"][1]["index"]]["section"], "Same")
+
+    def test_reading_progress_is_private_versioned_and_cascades(self):
+        book_id, path, _, _ = self.book(owner=BUILTIN_OWNER)
+        reading = self.reader(book_id).get_json()
+        progress_path = f"/api/books/{book_id}/reading-progress"
+        self.assertIsNone(self.a.get(progress_path).get_json()["progress"])
+        self.assertIsNone(self.b.get(progress_path).get_json()["progress"])
+        start = reading["blocks"][1]["start"] if len(reading["blocks"]) > 1 else 0
+        payload = {"version": reading["version"], "start": start, "finished": False}
+        saved = self.a.put(progress_path, json=payload,
+                           headers={"X-CSRF-Token": self.a_csrf})
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["progress"]["start"], start)
+        self.assertEqual(self.reader(book_id).get_json()["progress"]["start"], start)
+        self.assertIsNone(self.b.get(progress_path).get_json()["progress"])
+        self.assertEqual(self.b.put(progress_path, json=payload,
+                                    headers={"X-CSRF-Token": self.b_csrf}).status_code, 200)
+        self.assertEqual(self.a.get(progress_path).get_json()["progress"]["start"], start)
+        self.assertEqual(self.a.put(progress_path, json={**payload, "finished": 1},
+                                    headers={"X-CSRF-Token": self.a_csrf}).status_code, 400)
+        self.rewrite(path, "# Updated\n\nA changed textbook.")
+        self.assertEqual(self.a.put(progress_path, json=payload,
+                                    headers={"X-CSRF-Token": self.a_csrf}).status_code, 409)
+        with self.db.connect() as db:
+            db.execute("DELETE FROM books WHERE id=?", (book_id,))
+            self.assertEqual(db.execute("SELECT count(*) FROM reading_progress WHERE book_id=?",
+                                        (book_id,)).fetchone()[0], 0)
 
     def test_invalid_reader_parameters_and_surrogate_boundaries(self):
         book_id, _, _, ids = self.book("a" + ASTRAL + "b" * 6000, filename="unicode.txt")

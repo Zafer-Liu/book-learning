@@ -50,6 +50,7 @@ h1, h2, h3, p { margin: 0; }
 .auth-principles { display: flex; gap: 13px; flex-direction: column; font-size: 12px; color: #506784; }
 .auth-principles span::before { content: "—"; margin-right: 12px; color: var(--green); }
 .auth-side { display: grid; place-items: center; padding: 48px; background: var(--white); }
+.auth-stack { max-width: 360px; width: 100%; }
 .auth-form { max-width: 360px; width: 100%; display: flex; flex-direction: column; gap: 20px; }
 .auth-form h2 { font-weight: 600; font-size: 26px; margin-top: -10px; }
 .auth-form > .muted { margin: -8px 0 8px; font-size: 13px; }
@@ -90,7 +91,25 @@ h1, h2, h3, p { margin: 0; }
 .library-tab { flex: 1; padding: 8px 0; font-size: 12px; font-weight: 500; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; text-align: center; }
 .library-tab:hover { color: var(--ink); }
 .library-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
-.library-hint { color: var(--muted); font-size: 11px; line-height: 1.8; margin-bottom: 25px; }
+/* Adapted from Uiverse search input by @satyamchaudharydev; see docs/UI_COMPONENT_CREDITS.md. */
+.library-search { position: relative; margin-bottom: 12px; color: var(--muted); }
+.library-search input { width: 100%; height: 44px; margin: 0; padding: 0 41px; border: 1px solid var(--line); border-radius: 10px; background: var(--white); font-size: 12px; }
+.library-search input::placeholder { color: #617087; }
+.library-search input::-webkit-search-cancel-button { display: none; }
+.library-search input:focus { outline: none; }
+.library-search:focus-within input { border-color: #7796d7; box-shadow: 0 0 0 3px #315cc71a; }
+.library-search-icon { position: absolute; left: 13px; top: 13px; width: 18px; height: 18px; pointer-events: none; transition: transform .22s cubic-bezier(.4,0,.2,1); }
+.library-search-icon svg { position: absolute; inset: 0; width: 18px; height: 18px; transition: opacity .16s ease, transform .22s cubic-bezier(.4,0,.2,1); }
+.library-search-icon .search-arrow { opacity: 0; transform: rotate(-70deg); color: var(--green); }
+.library-search:focus-within .library-search-icon, .library-search.has-query .library-search-icon { transform: rotate(70deg); }
+.library-search:focus-within .search-glass, .library-search.has-query .search-glass { opacity: 0; }
+.library-search:focus-within .search-arrow, .library-search.has-query .search-arrow { opacity: 1; transform: rotate(-70deg); }
+.library-search-clear { position: absolute; right: 7px; top: 7px; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: var(--muted); }
+.library-search-clear:hover { color: var(--ink); background: var(--paper); }
+.library-search-clear svg { width: 15px; height: 15px; }
+.all-review-open { width: 100%; min-height: 44px; text-align: left; padding: 9px 12px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--white); font-size: 12px; }
+.all-review-open:hover, .all-review-open.has-due { color: var(--green); border-color: #a8c9bc; background: #f2f8f5; }
+.library-hint { color: var(--muted); font-size: 11px; line-height: 1.8; margin-bottom: 13px; }
 .book-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -5px; padding: 0 5px; }
 .book-item { width: 100%; display: flex; align-items: start; gap: 12px; text-align: left; padding: 13px 10px; border-radius: 8px; margin-bottom: 6px; border: 1px solid transparent; }
 .book-item:hover { background: #eaf0f8; }
@@ -103,6 +122,8 @@ h1, h2, h3, p { margin: 0; }
 .book-item.active .book-badge { border-color: #abbff1; color: var(--blue); background: var(--blue-soft); }
 .book-meta { display: block; font-size: 10px; color: var(--muted); line-height: 1.6; margin-top: 4px; }
 .book-meta.error { color: var(--danger); }
+.book-progress { display: block; width: 100%; height: 3px; margin-top: 9px; border-radius: 3px; overflow: hidden; background: #dfe8f3; }
+.book-progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--green); }
 .library-bottom { display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; color: var(--muted); font-size: 10px; }
 .status-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .library-empty { padding: 24px 10px; line-height: 2; color: var(--muted); font-size: 12px; }
@@ -129,8 +150,17 @@ h1, h2, h3, p { margin: 0; }
 .study-heading > div:first-child { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .study-heading h1 { font-size: 18px; font-weight: 600; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
 .study-heading p { font-size: 11px; color: var(--muted); line-height: 1.8; }
-.book-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; max-width: 135px; padding-top: 4px; flex-shrink: 0; }
+.book-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; max-width: 190px; padding-top: 4px; flex-shrink: 0; }
 .book-actions .text-button { font-size: 10px; }
+.book-actions #review-open { border-color: #a8c9bc; color: var(--green); }
+/* Adapted from Uiverse arrow button by @d4niz; see docs/UI_COMPONENT_CREDITS.md. */
+.read-book-button { position: relative; display: inline-flex; align-items: center; min-height: 38px; max-width: 100%; padding: 5px 43px 5px 12px; overflow: hidden; border-radius: 10px; background: var(--blue); color: var(--white); font-size: 11px; font-weight: 600; white-space: nowrap; box-shadow: inset 0 -8px 15px -12px #152f77; transition: transform .16s ease, box-shadow .16s ease, background .16s ease; }
+.read-book-button:hover { background: #234cad; transform: translateY(-1px); box-shadow: 0 5px 13px #172b4d1c; }
+.read-book-button:active { transform: translateY(0); box-shadow: inset 0 2px 5px #172b4d25; }
+.read-book-icon { position: absolute; right: 5px; top: 5px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #ffffff27; transition: background .16s ease, transform .16s ease; }
+.read-book-button:hover .read-book-icon { background: #ffffff3d; transform: translateX(1px); }
+.read-book-icon svg { width: 16px; height: 16px; }
+@media (prefers-reduced-motion: reduce) { .library-search-icon, .library-search-icon svg, .read-book-button, .read-book-icon { transition: none; } }
 .study-controls { display: flex; gap: 12px; padding: 0 30px 12px; border-bottom: 1px solid var(--line); align-items: flex-end; }
 .select-field { color: var(--muted); font-size: 10px; flex: 1; min-width: 0; }
 .select-field select { display: block; width: 100%; margin-top: 6px; padding: 7px 8px; font-size: 11px; text-overflow: ellipsis; }
@@ -164,6 +194,7 @@ h1, h2, h3, p { margin: 0; }
 .citation.web { color: var(--warning); background: var(--warning-bg); }
 .citation.web:hover { background: #f3e4c4; text-decoration: underline; }
 .answer-notice { color: var(--muted); font-size: 10px; line-height: 1.8; padding-top: 7px; }
+.answer-coverage { color: var(--warning); background: var(--warning-bg); border-radius: 7px; padding: 10px 12px; margin-bottom: 16px; font-size: 12px; line-height: 1.8; }
 .answer-debug { color: var(--muted); font: 10px var(--mono); line-height: 1.8; padding-top: 7px; margin-top: 4px; border-top: 1px dashed var(--line); }
 .no-evidence { border-left: 2px solid #bd985e; padding-left: 15px; color: var(--warning); font-size: 13px; line-height: 1.9; }
 .waiting { color: var(--muted); font-size: 12px; padding: 8px 0 20px; }
@@ -193,6 +224,25 @@ h1, h2, h3, p { margin: 0; }
 .quiz-rating { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
 .quiz-rating > span { color: var(--muted); font-size: 11px; }
 .quiz-rating button[aria-pressed="true"] { border-color: var(--green); color: var(--green); background: var(--white); }
+.quiz-save-status { min-height: 20px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.quiz-save-status.error { color: var(--danger); }
+.quiz-retry { font-size: 11px; color: var(--blue); padding: 3px 0; }
+.review-dialog { width: min(680px, calc(100% - 24px)); max-height: min(85dvh, 820px); border: 1px solid var(--line); border-radius: 14px; padding: 24px; box-shadow: 0 22px 70px #172b4d28; color: var(--ink); }
+.review-dialog::backdrop { background: #172b4d60; }
+.review-dialog .dialog-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.review-dialog .dialog-heading .square-button { width: 44px; height: 44px; }
+.review-dialog > .muted { font-size: 12px; line-height: 1.7; margin-bottom: 16px; }
+.review-list { max-height: calc(85dvh - 135px); overflow-y: auto; display: grid; gap: 16px; }
+.review-item { padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--white); }
+.review-book { color: var(--green); font-size: 11px; line-height: 1.6; margin-bottom: 5px; }
+.review-question { font: 600 15px/1.8 var(--sans); margin-bottom: 11px; white-space: pre-wrap; }
+.review-draft { width: 100%; min-height: 84px; padding: 10px 12px; font-size: 14px; line-height: 1.7; resize: vertical; }
+.review-item details { margin-top: 10px; }
+.review-item summary { cursor: pointer; color: var(--blue); font-size: 12px; }
+.review-answer { white-space: pre-wrap; font-size: 13px; line-height: 1.8; margin-top: 9px; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.review-actions button { min-height: 44px; }
+.review-empty { padding: 22px 8px; text-align: center; color: var(--muted); line-height: 1.8; }
 .composer-wrap { padding: 8px 30px 16px; }
 .mode-guide { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 3px 10px; margin-bottom: 10px; font-size: 11px; line-height: 1.8; }
 .mode-guide strong { color: var(--green); font-weight: 600; }
@@ -310,7 +360,7 @@ h1, h2, h3, p { margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @keyframes pulse { 50% { opacity: .3; } }
 @media (min-width: 1650px) { .desk { grid-template-columns: var(--library-w, 270px) minmax(500px, 1fr) 6px var(--evidence-w, 360px); } .study-heading, .messages { padding-left: 45px; padding-right: 45px; } .composer-wrap { padding-left: 45px; padding-right: 45px; } }
-@media (max-width: 1150px) { .desk { grid-template-columns: var(--library-w, 210px) minmax(320px, 1fr) 6px var(--evidence-w, 250px); } .study-heading, .messages { padding-left: 20px; padding-right: 20px; } .study-controls { padding-left: 20px; padding-right: 20px; gap: 8px; } .composer-wrap { padding-left: 20px; padding-right: 20px; } .book-actions { max-width: 70px; } .evidence { padding-left: 16px; padding-right: 16px; } .notice { margin-left: 20px; margin-right: 20px; } }
+@media (max-width: 1150px) { .desk { grid-template-columns: var(--library-w, 210px) minmax(320px, 1fr) 6px var(--evidence-w, 250px); } .study-heading, .messages { padding-left: 20px; padding-right: 20px; } .study-controls { padding-left: 20px; padding-right: 20px; gap: 8px; } .composer-wrap { padding-left: 20px; padding-right: 20px; } .book-actions { max-width: 160px; } .evidence { padding-left: 16px; padding-right: 16px; } .notice { margin-left: 20px; margin-right: 20px; } }
 @media (max-width: 930px) {
   .desk { display: block; position: relative; }
   .dragbar, .library-expand { display: none !important; }
@@ -342,7 +392,7 @@ h1, h2, h3, p { margin: 0; }
   #account-name { max-width: 110px; }
   .topbar .brand small { font-size: 8px; }
   .study-heading { padding: 12px 17px 10px; }
-  .book-actions { max-width: 72px; }
+  .book-actions { max-width: 150px; }
   .study-controls { padding: 0 17px 12px; gap: 6px; }
   .study-controls .outline-button { padding: 8px; font-size: 10px; }
   .messages { padding: 22px 17px; }
@@ -357,6 +407,8 @@ h1, h2, h3, p { margin: 0; }
   .notice { margin-left: 17px; margin-right: 17px; }
   #scope-label { max-width: 180px; }
   .upload-dialog { padding: 22px; }
+  .review-dialog { padding: 18px; }
+  .review-draft { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 
@@ -383,6 +435,9 @@ h1, h2, h3, p { margin: 0; }
 .reader-directory { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); min-width: 0; }
 .reader-directory select { flex: 1; min-width: 0; margin: 0; padding: 6px 8px; font-size: 11px; text-overflow: ellipsis; }
 .reader-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.reader-type-controls { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; border: 1px solid var(--line); border-radius: 7px; white-space: nowrap; }
+.reader-type-controls button { min-width: 36px; min-height: 34px; padding: 5px 7px; font-size: 13px; }
+.reader-type-value { min-width: 32px; text-align: center; color: var(--muted); font: 11px var(--sans); }
 .reader-hint { font-size: 10px; color: var(--muted); line-height: 1.7; }
 .reader-error { margin: 12px 18px 0; padding: 12px; border: 1px solid #d9a3a5; border-radius: 8px; background: #fdf1f1; display: flex; flex-direction: column; gap: 9px; font-size: 12px; color: var(--danger); }
 .reader-error .outline-button { align-self: flex-start; }
@@ -402,7 +457,7 @@ h1, h2, h3, p { margin: 0; }
 .reader-scroll:focus-visible { outline-offset: -3px; }
 .reader-stream { max-width: 680px; margin: 0 auto; }
 .reader-block + .reader-block { margin-top: 4px; }
-.reader-section { font: 10px/1.6 var(--mono); letter-spacing: .1em; color: var(--green); margin: 26px 0 10px; }
+.reader-section { font: 600 12px/1.6 var(--sans); color: var(--green); margin: 28px 0 12px; }
 .reader-text { font: 14px/2.35 var(--serif); color: #22354f; white-space: pre-wrap; overflow-wrap: anywhere; }
 .reader-highlight { color: inherit; border-radius: 2px; padding: 1px 0; box-decoration-break: clone; cursor: pointer; }
 .reader-highlight.highlight-yellow { background: #f6e7bd; }
@@ -414,7 +469,9 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reader-more:hover:not(:disabled) { color: var(--blue); border-color: #abbff1; background: var(--blue-soft); }
 .reader-more:disabled { border-style: solid; border-color: var(--line); }
 .reader-more.reader-load-error { color: var(--danger); border-color: #d9a3a5; background: #fdf1f1; }
-.reader-progress { text-align: center; font: 10px var(--mono); color: var(--muted); padding: 9px 16px 13px; background: var(--white); border-top: 1px solid var(--line); }
+.reader-progress { display: flex; align-items: center; justify-content: center; gap: 18px; font: 10px var(--mono); color: var(--muted); padding: 4px 16px; background: var(--white); border-top: 1px solid var(--line); }
+.reader-progress .text-button { color: var(--green); font-family: var(--sans); font-size: 12px; font-weight: 600; }
+.reader-sync-status { color: var(--muted); font: 10px var(--sans); }
 @media (max-width: 930px) {
   .desk[data-panel="evidence"] > .evidence.reader-open { display: flex; }
   .reader-notes { max-height: 45%; }
@@ -428,14 +485,15 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 }
 .desk.reading-focused > .library, .desk.reading-focused > .library-expand, .desk.reading-focused > .dragbar { display: none; }
 .desk.reading-focused > .evidence.reader-open { display: flex; width: 100%; height: 100%; border: 0; }
-.reading-focused .evidence > .panel-heading { flex-shrink: 0; min-height: 68px; padding: 10px 24px; background: var(--paper); }
+.reading-focused .evidence > .panel-heading { flex-shrink: 0; min-height: 54px; padding: 8px 24px; background: var(--paper); }
+.reading-focused .evidence > .panel-heading .eyebrow { display: none; }
 .reading-focused .evidence > .panel-heading h2 { font-size: 16px; margin-top: 2px; }
-.reading-focused .reader-tools { padding: 12px 24px; flex-shrink: 0; }
-/* Fullscreen measure scales with the screen: narrow viewports keep the old
-   760px behaviour, wide ones spread up to a readability cap of 1180px. */
-.reading-focused .reader-scroll { padding: 18px max(24px, calc((100% - clamp(760px, 72vw, 1180px)) / 2)) 40px; }
-.reading-focused .reader-stream, .reading-focused .reader-more { max-width: clamp(760px, 72vw, 1180px); }
-.reading-focused .reader-text { font-size: 16px; line-height: 2.4; }
+.reading-focused #reader-focus { min-height: 40px; }
+.reading-focused .reader-tools { padding: 10px 24px; flex-shrink: 0; }
+.reading-focused .reader-hint { display: none; }
+.reading-focused .reader-scroll { padding: 28px max(24px, calc((100% - 760px) / 2)) 64px; background: #fffefc; }
+.reading-focused .reader-stream, .reading-focused .reader-more { max-width: 760px; }
+.reading-focused .reader-text { font-size: var(--reader-font-size, 17px); line-height: 2.05; color: #243247; }
 .reading-focused .reader-progress { flex-shrink: 0; }
 .desk.reading-focused > .study {
   position: absolute; z-index: 3; display: flex; left: var(--chat-x, auto); top: var(--chat-y, auto);
@@ -466,21 +524,22 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reading-focused .composer textarea { resize: none; min-height: 60px; max-height: 84px; padding: 10px 12px 4px; }
 .reading-focused .composer-bottom { padding: 4px 8px 8px 12px; }
 .reading-focused .composer-note { margin-top: 6px; }
-.reader-chat-launcher { position: absolute; z-index: 4; right: 20px; bottom: max(20px, env(safe-area-inset-bottom)); padding: 13px 22px; border: 1px solid var(--blue); border-radius: 999px; background: var(--blue); color: var(--white); font-size: 13px; box-shadow: 0 6px 24px #172b4d26; }
+.reader-chat-launcher { position: absolute; z-index: 4; right: 132px; top: 5px; min-height: 44px; padding: 8px 14px; border: 1px solid var(--blue); border-radius: 7px; background: var(--blue); color: var(--white); font-size: 12px; }
 .reader-chat-launcher:hover { background: #234cad; }
 @media (min-width: 800px) {
   .reading-focused .reader-tools { grid-template-columns: minmax(0, 1fr) minmax(240px, 420px); column-gap: 28px; }
   .reading-focused .reader-book-title { align-self: center; }
-  .reading-focused .reader-hint { align-self: center; }
+  .reading-focused .reader-actions { grid-column: 1 / -1; }
 }
 @media (max-width: 600px) {
   .reading-focused .evidence > .panel-heading { padding: 10px 16px; }
   .reading-focused .reader-tools { padding: 10px 16px; gap: 6px; }
-  .reading-focused .reader-scroll { padding: 12px 20px 70px; }
+  .reading-focused .reader-scroll { padding: 20px 18px 36px; }
+  .reading-focused .reader-text { line-height: 1.95; }
   .desk.reading-focused > .study { right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: min(560px, 68%); max-height: calc(100% - 84px); }
   .reading-focused .study-controls { padding: 8px 12px; }
   .reading-focused .composer textarea { font-size: 16px; }
-  .reader-chat-launcher { right: 16px; }
+  .reader-chat-launcher { right: 104px; padding: 8px 10px; }
 }
 @media (max-height: 520px) {
   .desk.reading-focused > .study { height: calc(100% - 84px); bottom: 12px; }
@@ -490,7 +549,7 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 /* Touch and small-screen refinements: bigger tap targets, no hover-only
    affordances, and a popover that never covers the selection. */
 @media (hover: none), (max-width: 600px) {
-  .reader-actions button, .reader-more, .feedback-button, .feedback-reason { min-height: 36px; }
+  .reader-actions button, .reader-more, .feedback-button, .feedback-reason { min-height: 44px; }
   .reader-popover { padding: 6px 9px; gap: 2px; }
   .reader-popover button { padding: 10px 14px; font-size: 13px; }
   /* iOS Safari: a long-press selection should not trigger the callout menu
@@ -506,7 +565,6 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
   .share-head { flex-direction: column; align-items: flex-start; gap: 8px; }
   /* The floating chat window takes most of the phone screen while reading. */
   .desk.reading-focused > .study { left: 8px; right: 8px; width: auto; height: 62%; }
-  .reader-chat-launcher { padding: 15px 26px; }
   /* Selection toolbar buttons stay reachable above the composer. */
   .reading-focused .reader-chat-bar { top: 0; }
 }

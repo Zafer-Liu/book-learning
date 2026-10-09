@@ -8,6 +8,7 @@ const state = {
   testCodeRegistration: false, apiKeySet: false, controllers: new Set(), poll: null,
   statusText: '', typing: null, streamText: '', searchSteps: [], context: null,
   category: 'textbook', editingGroup: null, pendingSelection: null, bookStats: null,
+  reviewDueTotal: 0, reviewScopeBookId: null,
 };
 const modeNames = { qa: '教材问答', explain: '章节讲解', outline: '要点梳理', quiz: '自测练习' };
 const modeOptions = {
@@ -27,15 +28,25 @@ const modeOptions = {
     help: '整理核心要点、层次关系与复习清单，每条均可核对原文。',
   },
   quiz: {
-    action: '生成自测', prompt: '针对当前范围出三道自测题', title: '先试着回答，再对照原文。',
+    action: '生成自测', prompt: '针对当前范围出自测题', title: '先试着回答，再对照原文。',
     placeholder: '可填写想练习的主题；留空则针对所选范围出题',
-    help: '生成最多 3 道有教材依据的题目，先作答，再看解析并标记掌握情况。',
+    help: '按所选数量生成有教材依据的题目，先作答，再看解析并标记掌握情况。',
   },
 };
-// Drafts belong to the currently loaded messages, never to another account.
-// They survive UI re-renders but are not persisted to the server or storage.
+// Quiz state belongs to the currently loaded messages. Drafts and ratings are
+// restored from conversation history and saved to the current account.
 const quizProgress = new WeakMap();
+const reviewDrafts = new Map();
 const statusNames = { queued: '等待索引', indexing: '正在建立索引', ready: '可以学习', error: '索引失败' };
+
+function bookMeta(book) {
+  if (book.status !== 'ready') return statusNames[book.status] || book.status;
+  const base = `${book.section_count} 个章节 · ${book.chunk_count} 段`;
+  const progress = book.reading_progress;
+  if (!progress) return base;
+  return base + (progress.finished ? ' · 已到正文末尾'
+    : progress.percent ? ` · 已读约 ${progress.percent}%` : ' · 已开始阅读');
+}
 let toastTimer;
 let evidenceSequence = 0;
 let streamRenderTimer = null;
@@ -216,12 +227,22 @@ function showAuth() {
   state.csrf = '';
   state.config = null;
   state.books = [];
+  state.groups = [];
   state.book = null;
+  state.bookStats = null;
+  state.reviewDueTotal = 0;
+  state.reviewScopeBookId = null;
+  reviewDrafts.clear();
+  if ($('#review-dialog').open) $('#review-dialog').close();
   state.sections = [];
   state.conversations = [];
   state.conversation = null;
   state.messages = [];
   $('#question').value = '';
+  $('#library-search-input').value = '';
+  $('#library-search-clear').hidden = true;
+  $('.library-search').classList.remove('has-query');
+  $('#library-search-status').textContent = '';
   $('#password').value = '';
   $('#test-code').value = '';
   $('#api-key').value = '';
@@ -267,16 +288,39 @@ async function enterWorkspace(user) {
   await refreshBooks();
 }
 
+function appendReadingProgress(info, book) {
+  const progress = book.status === 'ready' ? book.reading_progress : null;
+  if (!progress) return;
+  const percent = progress.finished ? 100 : Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const track = element('span', 'book-progress');
+  track.setAttribute('role', 'progressbar');
+  track.setAttribute('aria-label', `${book.title}阅读进度`);
+  track.setAttribute('aria-valuemin', '0');
+  track.setAttribute('aria-valuemax', '100');
+  track.setAttribute('aria-valuenow', String(percent));
+  const fill = element('span', 'book-progress-fill');
+  fill.style.width = `${percent}%`;
+  track.append(fill);
+  info.append(track);
+}
+
 function renderLibrary() {
   const list = $('#book-list');
   list.replaceChildren();
+  const query = $('#library-search-input').value.trim().toLocaleLowerCase();
+  $('#library-search-clear').hidden = !query;
+  $('.library-search').classList.toggle('has-query', Boolean(query));
   if (state.category === 'literature') {
     // Render groups first, then individual literature
-    const readyGroups = state.groups;
-    const filtered = state.books.filter((b) => (b.category || 'textbook') === 'literature');
-    $('#book-count').textContent = filtered.length + readyGroups.length;
+    const allGroups = state.groups;
+    const allBooks = state.books.filter((b) => (b.category || 'textbook') === 'literature');
+    const readyGroups = allGroups.filter((group) => !query || group.title.toLocaleLowerCase().includes(query)
+      || (group.members || []).some((member) => (member.title || '').toLocaleLowerCase().includes(query)));
+    const filtered = allBooks.filter((book) => !query || book.title.toLocaleLowerCase().includes(query));
+    $('#book-count').textContent = query ? `${filtered.length + readyGroups.length}/${allBooks.length + allGroups.length}` : allBooks.length + allGroups.length;
+    $('#library-search-status').textContent = query ? `找到 ${filtered.length + readyGroups.length} 项` : '';
     if (!filtered.length && !readyGroups.length) {
-      list.append(element('p', 'library-empty', '书架还空着。点击右上角“＋”，上传第一份文献。'));
+      list.append(element('p', 'library-empty', query ? '没有找到匹配的文献或文献组。试试其他关键词。' : '书架还空着。点击右上角“＋”，上传第一份文献。'));
       return;
     }
     readyGroups.forEach((group) => {
@@ -300,16 +344,19 @@ function renderLibrary() {
       const name = element('span', 'book-name', book.title);
       if (book.builtin) name.append(element('span', 'book-badge', '内置'));
       info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
-        book.status === 'ready' ? `${book.section_count} 个章节 · ${book.chunk_count} 段` : statusNames[book.status] || book.status));
+        bookMeta(book)));
+      appendReadingProgress(info, book);
       button.append(element('span', 'book-spine', book.title.slice(0, 1) || '文'), info);
       action(button, 'click', () => selectBook(book.id, true, true));
       list.append(button);
     });
   } else {
-    const filtered = state.books.filter((book) => (book.category || 'textbook') === state.category);
-    $('#book-count').textContent = filtered.length;
+    const allBooks = state.books.filter((book) => (book.category || 'textbook') === state.category);
+    const filtered = allBooks.filter((book) => !query || book.title.toLocaleLowerCase().includes(query));
+    $('#book-count').textContent = query ? `${filtered.length}/${allBooks.length}` : allBooks.length;
+    $('#library-search-status').textContent = query ? `找到 ${filtered.length} 本教材` : '';
     if (!filtered.length) {
-      list.append(element('p', 'library-empty', '书架还空着。点击右上角“＋”，上传第一份教材。'));
+      list.append(element('p', 'library-empty', query ? '没有找到匹配的教材。试试其他关键词。' : '书架还空着。点击右上角“＋”，上传第一份教材。'));
       return;
     }
     filtered.forEach((book) => {
@@ -319,7 +366,8 @@ function renderLibrary() {
       const name = element('span', 'book-name', book.title);
       if (book.builtin) name.append(element('span', 'book-badge', '内置'));
       info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
-        book.status === 'ready' ? `${book.section_count} 个章节 · ${book.chunk_count} 段` : statusNames[book.status] || book.status));
+        bookMeta(book)));
+      appendReadingProgress(info, book);
       button.append(element('span', 'book-spine', book.title.slice(0, 1) || '书'), info);
       action(button, 'click', () => selectBook(book.id, true, true));
       list.append(button);
@@ -339,7 +387,10 @@ async function refreshBooks() {
   const [{ books }, { groups }] = await Promise.all([api('/api/books'), api('/api/groups')]);
   state.books = books;
   state.groups = groups || [];
+  state.reviewDueTotal = [...state.books, ...state.groups]
+    .reduce((sum, book) => sum + (book.review_due || 0), 0);
   renderLibrary();
+  updateReviewButton();
   if (state.book) {
     const current = books.find((book) => book.id === state.book.id)
       || state.groups.find((g) => g.id === state.book.id);
@@ -352,12 +403,18 @@ async function refreshBooks() {
       renderBook();
     } else if (current.status !== state.book.status) {
       await selectBook(current.id, false);
+    } else {
+      state.book.reading_progress = current.reading_progress;
+      updateReadButton();
     }
   }
   schedulePoll();
 }
 
 function resetStudy() {
+  if ($('#review-dialog').open) $('#review-dialog').close();
+  state.reviewScopeBookId = null;
+  state.bookStats = null;
   state.conversation = null;
   state.conversations = [];
   state.messages = [];
@@ -535,10 +592,13 @@ function renderBook() {
       ? `${book.section_count} 个章节 · ${book.chunk_count} 段原文 · ${book.index_backend.startsWith('vector') ? '语义 + 关键词混合检索' : '关键词检索（未启用语义向量）'}`
       : `${statusNames[book.status] || book.status} · 大部头教材首次索引需要一些时间`) : '上传已完成 OCR 的 Markdown，或选择书架中的教材。';
   }
-  $('#book-actions').hidden = !book || isGroup;
+  $('#book-actions').hidden = !book;
   $('#read-book').hidden = !book || book.status !== 'ready' || isGroup;
+  updateReadButton();
   $('#book-notes').hidden = !book || book.status !== 'ready' || isGroup;
   $('#export-cards').hidden = !book || book.status !== 'ready' || isGroup;
+  $('#review-open').hidden = !book || book.status !== 'ready';
+  updateReviewButton();
   if (book?.status === 'ready' && !isGroup && state.bookStats) {
     const s = state.bookStats;
     $('#current-meta').textContent += ` · 对话 ${s.conversations} · 提问 ${s.questions} · 批注 ${s.annotations}`;
@@ -553,6 +613,28 @@ function renderBook() {
   $('#reindex').disabled = !book || ['queued', 'indexing'].includes(book.status) || state.pending;
   renderMessages();
   updateComposer();
+}
+
+function updateReadButton() {
+  const progress = state.book?.reading_progress;
+  $('#read-book-label').textContent = progress?.finished ? '回到正文末尾'
+    : progress?.percent ? `继续阅读 · ${progress.percent}%` : '阅读全文';
+}
+
+function updateReviewButton() {
+  const count = state.bookStats?.review_due || 0;
+  $('#review-open').textContent = count ? `待复习 ${count}` : '待复习';
+  const total = state.reviewDueTotal || 0;
+  $('#all-review-open').textContent = total ? `今日复习 · ${total} 题` : '今日复习 · 暂无到期';
+  $('#all-review-open').classList.toggle('has-due', total > 0);
+}
+
+function setReviewDue(bookId, count, total) {
+  const book = [...state.books, ...state.groups].find((item) => item.id === bookId);
+  if (book) book.review_due = count;
+  if (state.book?.id === bookId && state.bookStats) state.bookStats.review_due = count;
+  if (Number.isInteger(total)) state.reviewDueTotal = total;
+  updateReviewButton();
 }
 
 function setMode(mode) {
@@ -776,11 +858,50 @@ function renderDiagram(diagram) {
   return box;
 }
 
+function persistQuizAttempt(message, index) {
+  const attempt = quizProgress.get(message)?.[index];
+  if (!attempt || !message.id || !attempt.bookId || !attempt.conversationId) return Promise.resolve();
+  clearTimeout(attempt.timer);
+  attempt.timer = null;
+  const revision = (attempt.saveRevision || 0) + 1;
+  attempt.saveRevision = revision;
+  const { bookId, conversationId, userId, csrf } = attempt;
+  const payload = { draft: attempt.draft, rating: attempt.rating };
+  if (attempt.statusNode?.isConnected) {
+    attempt.statusNode.textContent = '保存中…';
+    attempt.statusNode.classList.remove('error');
+    attempt.retryButton.hidden = true;
+  }
+  const save = async () => {
+    const response = await fetch(`/api/books/${bookId}/conversations/${conversationId}/messages/${message.id}/quiz/${index}`, {
+      method: 'PATCH', credentials: 'same-origin', keepalive: true,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `保存失败（${response.status}）`);
+    if (state.user?.id === userId) setReviewDue(bookId, data.review_due, data.review_due_total);
+    if (attempt.saveRevision === revision && attempt.statusNode?.isConnected) attempt.statusNode.textContent = '已保存';
+  };
+  attempt.saveQueue = (attempt.saveQueue || Promise.resolve()).catch(() => {}).then(save);
+  attempt.saveQueue.catch((error) => {
+    if (attempt.saveRevision === revision && attempt.statusNode?.isConnected) {
+      attempt.statusNode.textContent = error.message || '保存失败';
+      attempt.statusNode.classList.add('error');
+      attempt.retryButton.hidden = false;
+    }
+  });
+  return attempt.saveQueue;
+}
+
 function renderQuizPractice(article, message, references, reveal) {
   const items = message.quiz || [];
   if (!items.length) return;
   if (!quizProgress.has(message)) {
-    quizProgress.set(message, items.map(() => ({ draft: '', open: false, rating: '' })));
+    const saved = new Map((message.quiz_attempts || []).map((item) => [item.question_index, item]));
+    quizProgress.set(message, items.map((_, index) => ({ draft: saved.get(index)?.draft || '',
+      open: false, rating: saved.get(index)?.rating || '', bookId: state.book?.id,
+      conversationId: state.conversation?.id, userId: state.user?.id, csrf: state.csrf })));
   }
   const progress = quizProgress.get(message);
   const locked = state.pending || Boolean(state.typing);
@@ -793,7 +914,7 @@ function renderQuizPractice(article, message, references, reveal) {
   };
   updateCount();
   heading.append(element('strong', '', '自测答题纸'), count);
-  worksheet.append(heading, element('p', 'quiz-local-note', '作答与自评仅在当前对话页面保留，刷新或切换对话后清空；自评不是自动评分。'));
+  worksheet.append(heading, element('p', 'quiz-local-note', '作答与自评会保存到当前账户。先独立作答，再对照原文；“已掌握”只是自评，题目会在之后再次出现。'));
   items.forEach((item, index) => {
     const attempt = progress[index];
     const full = `${index + 1}. ${item.question}`;
@@ -812,7 +933,14 @@ function renderQuizPractice(article, message, references, reveal) {
       draft.disabled = locked;
       draft.dataset.messageId = message.id || '';
       draft.dataset.questionIndex = String(index);
-      draft.addEventListener('input', () => { attempt.draft = draft.value; updateCount(); });
+      draft.addEventListener('input', () => {
+        attempt.draft = draft.value;
+        updateCount();
+        if (attempt.statusNode) { attempt.statusNode.textContent = '未保存'; attempt.statusNode.classList.remove('error'); }
+        clearTimeout(attempt.timer);
+        attempt.timer = setTimeout(() => persistQuizAttempt(message, index), 700);
+      });
+      draft.addEventListener('blur', () => { if (attempt.timer) persistQuizAttempt(message, index); });
       label.append(draft);
       const details = element('details');
       details.open = attempt.open;
@@ -838,21 +966,112 @@ function renderQuizPractice(article, message, references, reveal) {
           attempt.rating = attempt.rating === value ? '' : value;
           buttons.forEach(([node, key]) => node.setAttribute('aria-pressed', String(attempt.rating === key)));
           updateCount();
+          persistQuizAttempt(message, index);
         });
         buttons.push([button, value]);
         rating.append(button);
       });
       details.append(rating);
-      quiz.append(label, details);
+      attempt.statusNode = element('span', 'quiz-save-status');
+      attempt.statusNode.setAttribute('aria-live', 'polite');
+      attempt.retryButton = element('button', 'quiz-retry', '重试保存');
+      attempt.retryButton.type = 'button';
+      attempt.retryButton.addEventListener('click', () => persistQuizAttempt(message, index));
+      attempt.retryButton.hidden = true;
+      quiz.append(label, details, attempt.statusNode, attempt.retryButton);
     }
     worksheet.append(quiz);
   });
   article.append(worksheet);
 }
 
+async function loadReviewQueue() {
+  const scopeBookId = state.reviewScopeBookId;
+  const list = $('#review-list');
+  list.replaceChildren(element('p', 'review-empty', '正在读取待复习题目…'));
+  try {
+    const data = await api(scopeBookId ? `/api/books/${scopeBookId}/review` : '/api/review');
+    if (!$('#review-dialog').open || state.reviewScopeBookId !== scopeBookId) return;
+    if (scopeBookId) setReviewDue(scopeBookId, data.due_count, data.due_total);
+    else { state.reviewDueTotal = data.due_count; updateReviewButton(); }
+    list.replaceChildren();
+    if (!data.items.length) {
+      list.append(element('p', 'review-empty', '目前没有到期题目。继续阅读或完成自测后，这里会汇集需要回顾的内容。'));
+      return;
+    }
+    data.items.forEach((item) => {
+      const card = element('article', 'review-item');
+      if (!scopeBookId) card.append(element('p', 'review-book', `《${item.book_title}》`));
+      card.append(element('p', 'review-question', item.question));
+      const draftKey = `${item.book_id}:${item.message_id}:${item.question_index}`;
+      const draft = element('textarea', 'review-draft');
+      draft.value = reviewDrafts.get(draftKey) || '';
+      draft.addEventListener('input', () => reviewDrafts.set(draftKey, draft.value));
+      draft.placeholder = '先不看答案，用自己的话重新作答。';
+      draft.maxLength = 3000;
+      draft.setAttribute('aria-label', `复习作答：${item.question.slice(0, 70)}`);
+      card.append(draft);
+      const details = element('details');
+      details.append(element('summary', '', '查看参考答案与教材解析'));
+      const answer = element('p', 'review-answer');
+      const explanation = element('p', 'review-answer');
+      appendInline(answer, `参考答案：${item.answer}`);
+      appendInline(explanation, `教材解析：${item.explanation}`);
+      details.append(answer, explanation);
+      const actions = element('div', 'review-actions');
+      const save = async (rating) => {
+        for (const button of actions.querySelectorAll('button')) button.disabled = true;
+        try {
+          const result = await api(`/api/books/${item.book_id}/conversations/${item.conversation_id}`
+            + `/messages/${item.message_id}/quiz/${item.question_index}`, {
+              method: 'PATCH', body: { draft: draft.value, rating, reviewed: true },
+            });
+          reviewDrafts.delete(draftKey);
+          setReviewDue(item.book_id, result.review_due, result.review_due_total);
+          await loadReviewQueue();
+        } catch (error) {
+          toast(error.message || '复习结果保存失败，请重试。');
+          for (const button of actions.querySelectorAll('button')) button.disabled = false;
+        }
+      };
+      const again = element('button', 'outline-button', '还需复习 · 明天再练');
+      again.addEventListener('click', () => save('review'));
+      const known = element('button', 'outline-button', '这次记住了 · 三天后再练');
+      known.addEventListener('click', () => save('understood'));
+      const original = element('button', 'text-button', '查看原对话与引用');
+      original.addEventListener('click', async () => {
+        $('#review-dialog').close();
+        if (state.book?.id !== item.book_id) await selectBook(item.book_id, true, false);
+        await selectConversation(item.conversation_id);
+        panel('study');
+        const target = [...$('#messages').querySelectorAll('[data-message-id]')]
+          .find((node) => node.dataset.messageId === item.message_id);
+        target?.scrollIntoView({ block: 'center' });
+      });
+      actions.append(again, known, original);
+      details.append(actions);
+      card.append(details);
+      list.append(card);
+    });
+  } catch (error) {
+    list.replaceChildren(element('p', 'form-error', error.message || '待复习题目读取失败。'));
+  }
+}
+
+function openReview(bookId = null) {
+  if (bookId && (!state.book || state.book.id !== bookId || state.book.status !== 'ready')) return;
+  state.reviewScopeBookId = bookId;
+  $('#review-title').textContent = bookId ? `《${state.book.title}》待复习` : '今日复习';
+  $('#review-dialog').showModal();
+  loadReviewQueue();
+}
+
 function renderAssistantBody(article, message, reveal) {
   const references = message.citations || [];
   const typing = Boolean(reveal);
+  if (message.retrieval?.scope === 'selected-excerpts' && message.notice) {
+    article.append(element('p', 'answer-coverage', message.notice));
+  }
   (message.paragraphs || []).forEach((item, index) => {
     const paragraph = element('p', 'answer-paragraph');
     const budget = typing ? (reveal[index] || 0) : null;
@@ -865,7 +1084,7 @@ function renderAssistantBody(article, message, reveal) {
   // final (never during the live stream or the typing replay).
   if (!typing) (message.diagrams || []).forEach((diagram) => article.append(renderDiagram(diagram)));
   if (!typing) {
-    if (message.notice) article.append(element('p', 'answer-notice', message.notice));
+    if (message.notice && message.retrieval?.scope !== 'selected-excerpts') article.append(element('p', 'answer-notice', message.notice));
     if (message.retrieval?.degraded) article.append(element('p', 'answer-notice', '本次使用关键词检索，语义向量不可用。'));
     // The model's search_book calls stay reviewable under the answer.
     const steps = message.retrieval?.steps;
@@ -971,6 +1190,7 @@ function renderMessages() {
   if (!state.messages.length && !state.pending && !state.typing) container.append(renderEmpty());
   state.messages.forEach((message) => {
     const article = element('article', `message ${message.role}`);
+    if (message.id) article.dataset.messageId = message.id;
     const heading = element('div', 'message-head');
     heading.append(element('strong', '', message.role === 'user' ? '你' : '书内'), element('span', '', modeNames[message.mode] || '教材问答'));
     article.append(heading);
@@ -1018,10 +1238,35 @@ function renderMessages() {
 
 const readerUI = createReader({
   api, element, panel, toast,
+  getAuth: () => ({ userId: state.user?.id, csrf: state.csrf }),
+  onProgress: ({ bookId, userId, progress }) => {
+    if (state.user?.id !== userId) return;
+    const book = state.books.find((item) => item.id === bookId);
+    if (book) {
+      const previous = book.reading_progress;
+      book.reading_progress = progress;
+      if (previous?.percent !== progress.percent || previous?.finished !== progress.finished) renderLibrary();
+    }
+    if (state.book?.id === bookId) {
+      state.book.reading_progress = progress;
+      updateReadButton();
+    }
+  },
   findBook: (bookId) => state.books.find((book) => book.id === bookId)
     || state.groups.find((group) => group.id === bookId) || null,
   getEpoch: () => state.epoch,
   onAsk: askAboutSelection,
+  onQuiz: ({ section }) => {
+    if (state.pending || state.book?.status !== 'ready') return;
+    const picker = $('#section-select');
+    if ([...picker.options].some((option) => option.value === section)) picker.value = section;
+    state.pendingSelection = null;
+    renderSelectionChip();
+    setMode('quiz');
+    panel('study');
+    if (state.config?.llm_configured) $('#chat-form').requestSubmit();
+    else toast('当前未配置问答模型，暂时无法生成自测题。');
+  },
 });
 
 async function showEvidence(bookId, reference) {
@@ -1051,6 +1296,19 @@ function setCategory(category) {
 
 document.querySelectorAll('.library-tab').forEach((tab) => {
   tab.addEventListener('click', () => setCategory(tab.dataset.category));
+});
+
+$('#library-search-input').addEventListener('input', renderLibrary);
+$('#library-search-input').addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && event.currentTarget.value) {
+    event.currentTarget.value = '';
+    renderLibrary();
+  }
+});
+$('#library-search-clear').addEventListener('click', () => {
+  $('#library-search-input').value = '';
+  renderLibrary();
+  $('#library-search-input').focus();
 });
 
 $('#auth-toggle').addEventListener('click', () => { state.registering = !state.registering; setAuthMode(); });
@@ -1210,6 +1468,9 @@ action($('#reindex'), 'click', async () => {
   toast('已重新加入索引队列。');
 });
 action($('#read-book'), 'click', () => state.book && readerUI.open(state.book.id, { expanded: true }));
+action($('#review-open'), 'click', () => openReview(state.book?.id));
+action($('#all-review-open'), 'click', () => openReview());
+$('#review-close').addEventListener('click', () => $('#review-dialog').close());
 action($('#book-notes'), 'click', () => state.book && readerUI.open(state.book.id, { notes: true }));
 action($('#new-conversation'), 'click', () => selectConversation(''));
 action($('#delete-conversation'), 'click', deleteConversation);

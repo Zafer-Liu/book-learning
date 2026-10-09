@@ -17,3 +17,4 @@ Asset/
 # (copyrighted, never pushed) must stay UNTRACKED but NOT ignored: they ride
 # the build context as plain untracked files, guarded by a local pre-commit
 # hook — see the deploy notes in README.
+/builtin_books

@@ -100,6 +100,33 @@ CREATE TABLE IF NOT EXISTS shares (
 CREATE INDEX IF NOT EXISTS shares_message ON shares(message_id);
 """
 
+QUIZ_SCHEMA = """
+CREATE TABLE IF NOT EXISTS quiz_attempts (
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    question_index INTEGER NOT NULL CHECK(question_index BETWEEN 0 AND 9),
+    draft TEXT NOT NULL DEFAULT '' CHECK(length(draft) <= 3000),
+    rating TEXT NOT NULL DEFAULT '' CHECK(rating IN ('', 'understood', 'review')),
+    due_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, message_id, question_index)
+);
+CREATE INDEX IF NOT EXISTS quiz_attempts_due ON quiz_attempts(owner_id, book_id, due_at);
+"""
+
+READING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS reading_progress (
+    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    version TEXT NOT NULL CHECK(length(version) = 64),
+    start INTEGER NOT NULL CHECK(start >= 0),
+    text_length INTEGER NOT NULL CHECK(text_length > start),
+    finished INTEGER NOT NULL DEFAULT 0 CHECK(finished IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, book_id)
+);
+"""
+
 
 class Database:
     def __init__(self, root: Path):
@@ -133,6 +160,9 @@ class Database:
             if "parser_version" not in columns:
                 db.execute("ALTER TABLE books ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 0")
             self._migrate_books_category_check(db)
+            # Build after legacy migrations, which may rebuild books and messages.
+            db.executescript(QUIZ_SCHEMA)
+            db.executescript(READING_SCHEMA)
             db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(tokens)")
             db.executescript("""
                 CREATE TRIGGER IF NOT EXISTS chunks_delete_fts AFTER DELETE ON chunks BEGIN
@@ -225,6 +255,17 @@ def public_book(row):
     result = dict(row)
     result["builtin"] = result.pop("owner_id", "") == BUILTIN_OWNER
     result.pop("source_path", None)
+    return result
+
+
+def public_reading_progress(row):
+    if row is None:
+        return None
+    result = dict(row)
+    result.pop("book_id", None)
+    result["length"] = result.pop("text_length")
+    result["finished"] = bool(result["finished"])
+    result["percent"] = 100 if result["finished"] else min(99, result["start"] * 100 // result["length"])
     return result
 
 

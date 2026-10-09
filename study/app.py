@@ -26,7 +26,7 @@ from .compaction import (
     compaction_circuit_open, compact_conversation, context_usage,
     record_compaction_result, should_compact,
 )
-from .database import BUILTIN_OWNER, Database, public_book, public_message
+from .database import BUILTIN_OWNER, Database, public_book, public_message, public_reading_progress
 from .documents import FORMATS, PARSER_VERSION, parse_document, split_sections
 from .rag import EmbeddingClient, index_tokens, retrieve, semantic_sentence_ranges, terms
 from .reader import register_reader_routes
@@ -42,7 +42,7 @@ LOG = logging.getLogger(__name__)
 SCOPE_COMMANDS = {
     "explain": ("讲解当前范围", "开始讲解", "章节讲解"),
     "outline": ("梳理当前范围的要点", "生成要点", "要点梳理"),
-    "quiz": ("针对当前范围出三道自测题", "生成自测", "自测练习"),
+    "quiz": ("针对当前范围出自测题", "针对当前范围出三道自测题", "生成自测", "自测练习"),
 }
 
 
@@ -298,7 +298,7 @@ def create_app(test_config=None):
         response = send_from_directory(ROOT / "web", name)
         # Windows hosts may map .js/.css to text/plain via the registry, which
         # makes browsers refuse to execute the scripts; pin the MIME types.
-        asset_mime = {".js": "application/javascript; charset=utf-8",
+        asset_mime = {".js": "text/javascript; charset=utf-8",
                       ".css": "text/css; charset=utf-8"}
         suffix = "." + name.rsplit(".", 1)[-1].lower()
         if suffix in asset_mime:
@@ -714,6 +714,13 @@ def create_app(test_config=None):
             book_lock.release()
             index_slots.release()
 
+    def review_due_by_book(db):
+        rows = db.execute(
+            "SELECT book_id,count(*) AS due FROM quiz_attempts "
+            "WHERE owner_id=? AND rating!='' AND due_at<=? GROUP BY book_id",
+            (g.user["id"], now())).fetchall()
+        return {row["book_id"]: row["due"] for row in rows}
+
     @app.get("/api/books")
     def books():
         category = request.args.get("category")
@@ -726,7 +733,13 @@ def create_app(test_config=None):
             else:
                 rows = db.execute("SELECT * FROM books WHERE owner_id IN (?, ?) AND category != 'group' ORDER BY created_at DESC",
                                   (g.user["id"], BUILTIN_OWNER)).fetchall()
-        return jsonify(books=[public_book(row) for row in rows])
+            due = review_due_by_book(db)
+            progress_rows = db.execute(
+                "SELECT book_id,version,start,text_length,finished,updated_at "
+                "FROM reading_progress WHERE owner_id=?", (g.user["id"],)).fetchall()
+            progress = {item["book_id"]: public_reading_progress(item) for item in progress_rows}
+        return jsonify(books=[{**public_book(row), "review_due": due.get(row["id"], 0),
+                               "reading_progress": progress.get(row["id"])} for row in rows])
 
     @app.post("/api/books")
     def upload():
@@ -803,10 +816,14 @@ def create_app(test_config=None):
                     (book_id,)).fetchall()
                 item = public_book(row)
                 item["members"] = [dict(m) for m in members]
-                return jsonify(book=item, sections=[])
+                due = review_due_by_book(db).get(book_id, 0)
+                return jsonify(book=item, sections=[], stats={"review_due": due})
             sections = db.execute("SELECT section AS name,count(*) AS chunk_count FROM chunks "
                                   "WHERE owner_id IN (?, ?) AND book_id=? GROUP BY section ORDER BY min(ordinal)",
                                   (g.user["id"], BUILTIN_OWNER, book_id)).fetchall()
+            progress_row = db.execute(
+                "SELECT version,start,text_length,finished,updated_at FROM reading_progress "
+                "WHERE owner_id=? AND book_id=?", (g.user["id"], book_id)).fetchone()
             # Lightweight study stats for the header line.
             stats = {
                 "conversations": db.execute("SELECT count(*) FROM conversations WHERE owner_id=? AND book_id=?",
@@ -815,10 +832,15 @@ def create_app(test_config=None):
                                         (g.user["id"], book_id)).fetchone()[0],
                 "annotations": db.execute("SELECT count(*) FROM annotations WHERE owner_id=? AND book_id=?",
                                           (g.user["id"], book_id)).fetchone()[0],
+                "review_due": db.execute("SELECT count(*) FROM quiz_attempts WHERE owner_id=? AND book_id=? "
+                                         "AND rating!='' AND due_at<=?",
+                                         (g.user["id"], book_id, now())).fetchone()[0],
                 "last_activity": db.execute("SELECT max(created_at) FROM messages WHERE owner_id=? AND book_id=?",
                                             (g.user["id"], book_id)).fetchone()[0] or "",
             }
-        return jsonify(book=public_book(row), sections=[dict(s) for s in sections], stats=stats)
+        item = public_book(row)
+        item["reading_progress"] = public_reading_progress(progress_row)
+        return jsonify(book=item, sections=[dict(s) for s in sections], stats=stats)
 
     @app.delete("/api/books/<book_id>")
     def delete_book(book_id):
@@ -858,6 +880,7 @@ def create_app(test_config=None):
                 db.execute("UPDATE books SET status='queued',error='' WHERE id=? AND owner_id=?", (book_id, g.user["id"]))
                 # Old citation identifiers must never refer to new chunks after reindexing.
                 db.execute("DELETE FROM conversations WHERE book_id=? AND owner_id=?", (book_id, g.user["id"]))
+                db.execute("DELETE FROM reading_progress WHERE book_id=? AND owner_id=?", (book_id, g.user["id"]))
                 updated = db.execute("SELECT * FROM books WHERE id=? AND owner_id=?", (book_id, g.user["id"])).fetchone()
             executor.submit(index_book, g.user["id"], book_id, root / row["source_path"], row["filename"], book_lock)
         except Exception:
@@ -969,6 +992,7 @@ def create_app(test_config=None):
                 "SELECT * FROM books WHERE owner_id=? AND category='group' ORDER BY created_at DESC",
                 (g.user["id"],)).fetchall()
             groups = []
+            due = review_due_by_book(db)
             for row in rows:
                 members = db.execute(
                     "SELECT b.id, b.title, b.status FROM group_members gm "
@@ -976,6 +1000,7 @@ def create_app(test_config=None):
                     (row["id"],)).fetchall()
                 item = public_book(row)
                 item["members"] = [dict(m) for m in members]
+                item["review_due"] = due.get(row["id"], 0)
                 groups.append(item)
         return jsonify(groups=groups)
 
@@ -1154,14 +1179,113 @@ def create_app(test_config=None):
                 "WHERE messages.owner_id=? AND messages.book_id=? AND messages.conversation_id=? "
                 "ORDER BY messages.created_at, messages.id",
                 (g.user["id"], book_id, conversation_id)).fetchall()
+            attempts = db.execute(
+                "SELECT qa.message_id,qa.question_index,qa.draft,qa.rating,qa.due_at "
+                "FROM quiz_attempts qa JOIN messages m ON m.id=qa.message_id "
+                "WHERE qa.owner_id=? AND qa.book_id=? AND m.conversation_id=?",
+                (g.user["id"], book_id, conversation_id)).fetchall()
+        by_message = defaultdict(list)
+        for attempt in attempts:
+            by_message[attempt["message_id"]].append(dict(attempt))
         # Context meter: the un-compacted tail that counts toward the next
         # compression, plus the summary size already folded away.
         summary = conversation["summary"] or ""
         context = context_usage([dict(row) for row in rows], conversation["summary_mark"] or "")
         context["summary_chars"] = len(summary)
         return jsonify(conversation={key: conversation[key] for key in ("id", "title", "created_at")},
-                       messages=[{**public_message(row), "feedback": row["feedback_rating"]} for row in rows],
+                       messages=[{**public_message(row), "feedback": row["feedback_rating"],
+                                  "quiz_attempts": by_message.get(row["id"], [])} for row in rows],
                        context=context)
+
+    def review_due_count(db, book_id=None):
+        if book_id is None:
+            return db.execute("SELECT count(*) FROM quiz_attempts WHERE owner_id=? "
+                              "AND rating!='' AND due_at<=?", (g.user["id"], now())).fetchone()[0]
+        return db.execute("SELECT count(*) FROM quiz_attempts WHERE owner_id=? AND book_id=? "
+                          "AND rating!='' AND due_at<=?", (g.user["id"], book_id, now())).fetchone()[0]
+
+    @app.patch("/api/books/<book_id>/conversations/<conversation_id>/messages/<message_id>/quiz/<int:question_index>")
+    def save_quiz_attempt(book_id, conversation_id, message_id, question_index):
+        data = body()
+        if set(data) - {"draft", "rating", "reviewed"}:
+            abort(400, description="自测记录字段无效。")
+        draft, rating, reviewed = data.get("draft"), data.get("rating"), data.get("reviewed", False)
+        if (not isinstance(draft, str) or len(draft) > 3000 or "\x00" in draft
+                or rating not in ("", "understood", "review") or type(reviewed) is not bool):
+            abort(400, description="自测作答或自评无效。")
+        throttle(("quiz_attempt", g.user["id"]), 240, 600)
+        stamp = now()
+        with database.connect() as db:
+            book_row(db, book_id)
+            conversation_row(db, book_id, conversation_id)
+            row = db.execute("SELECT mode,payload FROM messages WHERE id=? AND owner_id=? AND book_id=? "
+                             "AND conversation_id=? AND role='assistant'",
+                             (message_id, g.user["id"], book_id, conversation_id)).fetchone()
+            if row is None or row["mode"] != "quiz":
+                abort(404, description="自测题不存在。")
+            quiz = json.loads(row["payload"]).get("quiz") or []
+            if not 0 <= question_index < len(quiz):
+                abort(404, description="自测题不存在。")
+            previous = db.execute("SELECT rating,due_at FROM quiz_attempts WHERE owner_id=? AND message_id=? "
+                                  "AND question_index=?", (g.user["id"], message_id, question_index)).fetchone()
+            if previous and previous["rating"] == rating and not reviewed:
+                due = previous["due_at"]
+            elif rating == "understood" or (rating == "review" and reviewed):
+                due = (datetime.now(timezone.utc) + timedelta(days=3 if rating == "understood" else 1))\
+                    .isoformat(timespec="microseconds")
+            else:
+                due = stamp if rating == "review" else ""
+            db.execute("INSERT INTO quiz_attempts(owner_id,book_id,message_id,question_index,draft,rating,due_at,updated_at) "
+                       "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,message_id,question_index) "
+                       "DO UPDATE SET draft=excluded.draft,rating=excluded.rating,due_at=excluded.due_at,"
+                       "updated_at=excluded.updated_at",
+                       (g.user["id"], book_id, message_id, question_index, draft, rating, due, stamp))
+            count = review_due_count(db, book_id)
+            total = review_due_count(db)
+        return jsonify(attempt={"question_index": question_index, "draft": draft, "rating": rating,
+                                "due_at": due}, review_due=count, review_due_total=total)
+
+    def review_items(db, book_id=None):
+        cutoff = now()
+        where = ("qa.owner_id=? AND m.owner_id=? AND b.owner_id IN (?, ?) "
+                 "AND qa.rating!='' AND qa.due_at<=?")
+        params = [g.user["id"], g.user["id"], g.user["id"], BUILTIN_OWNER, cutoff]
+        if book_id is not None:
+            where += " AND qa.book_id=?"
+            params.append(book_id)
+        source = (" FROM quiz_attempts qa JOIN books b ON b.id=qa.book_id "
+                  "JOIN messages m ON m.id=qa.message_id WHERE " + where)
+        count = db.execute("SELECT count(*)" + source, params).fetchone()[0]
+        rows = db.execute(
+            "SELECT qa.book_id,b.title AS book_title,qa.question_index,qa.rating,qa.due_at,"
+            "m.id AS message_id,m.conversation_id,m.payload" + source
+            + " ORDER BY qa.due_at,qa.updated_at LIMIT 20", params).fetchall()
+        items = []
+        for row in rows:
+            quiz = json.loads(row["payload"]).get("quiz") or []
+            if row["question_index"] >= len(quiz):
+                continue
+            question = quiz[row["question_index"]]
+            items.append({"book_id": row["book_id"], "book_title": row["book_title"],
+                          "message_id": row["message_id"], "conversation_id": row["conversation_id"],
+                          "question_index": row["question_index"], "question": question["question"],
+                          "answer": question["answer"], "explanation": question["explanation"],
+                          "rating": row["rating"], "due_at": row["due_at"]})
+        return items, count
+
+    @app.get("/api/review")
+    def all_review_queue():
+        with database.connect() as db:
+            items, count = review_items(db)
+        return jsonify(items=items, due_count=count)
+
+    @app.get("/api/books/<book_id>/review")
+    def review_queue(book_id):
+        with database.connect() as db:
+            book_row(db, book_id)
+            items, count = review_items(db, book_id)
+            total = review_due_count(db)
+        return jsonify(items=items, due_count=count, due_total=total)
 
     @app.post("/api/books/<book_id>/conversations/<conversation_id>/messages/<message_id>/feedback")
     def rate_message(book_id, conversation_id, message_id):
@@ -1641,6 +1765,7 @@ def create_app(test_config=None):
                         shutil.copyfile(path, source)
                     # Old citations must never refer to new chunks after a content update.
                     db.execute("DELETE FROM conversations WHERE book_id=?", (book_id,))
+                    db.execute("DELETE FROM reading_progress WHERE book_id=?", (book_id,))
                 db.execute("UPDATE books SET status='queued',error='',filename=?,category=? WHERE id=? AND owner_id=?",
                            (path.name, category, book_id, BUILTIN_OWNER))
             # The dedicated seed thread may wait without delaying web requests.

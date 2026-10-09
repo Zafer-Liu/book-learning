@@ -1817,7 +1817,7 @@ class IsolationTests(unittest.TestCase):
                            (self.a_id, self.book_a, ordinal, "第一章", f"甲教材第一章第 {ordinal} 段。"))
             db.execute("INSERT INTO chunks(owner_id,book_id,ordinal,section,text) VALUES(?,?,10,'第二章','不可选的第二章')",
                        (self.a_id, self.book_a))
-        defaults = {"explain": "讲解当前范围", "outline": "梳理当前范围的要点", "quiz": "针对当前范围出三道自测题"}
+        defaults = {"explain": "讲解当前范围", "outline": "梳理当前范围的要点", "quiz": "针对当前范围出自测题"}
         actions = {"explain": ("开始讲解", "章节讲解"), "outline": ("生成要点", "要点梳理"),
                    "quiz": ("生成自测", "自测练习")}
         statements, payloads = [], []
@@ -1843,8 +1843,11 @@ class IsolationTests(unittest.TestCase):
                 patch("study.tutor.requests.post", side_effect=post):
             for mode, default in defaults.items():
                 action, label = actions[mode]
-                for message in ("", " \t\n", default, action, label, f" \t{action}\n",
-                                f"请{action}。", f"请帮我 {action}！", f"帮我{action}？"):
+                commands = ("", " \t\n", default, action, label, f" \t{action}\n",
+                            f"请{action}。", f"请帮我 {action}！", f"帮我{action}？")
+                if mode == "quiz":
+                    commands += ("针对当前范围出三道自测题",)
+                for message in commands:
                     with self.subTest(mode=mode, message=message):
                         cid = self.conversation(self.book_a)
                         with self.db.connect() as db:
@@ -1890,7 +1893,7 @@ class IsolationTests(unittest.TestCase):
         for mocked in (tokenize, retrieve_mock, embed, agent):
             mocked.assert_not_called()
         self.assertFalse(any("chunks_fts MATCH" in sql for sql in statements))
-        self.assertEqual(len(payloads), 27)
+        self.assertEqual(len(payloads), 28)
 
     def test_start_explanation_uses_all_five_builtin_section_chunks(self):
         # Do not depend on the background builtin seeder creating its owner first.
