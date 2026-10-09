@@ -74,6 +74,8 @@ h1, h2, h3, p { margin: 0; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .panel-heading h2 { font-size: 17px; font-weight: 600; margin-top: 6px; }
 .heading-buttons { display: flex; gap: 6px; }
+/* The « glyph has a generous font box; keep the collapse control optically centered. */
+#library-toggle { line-height: 1; padding: 0 0 2px; }
 .desk.library-collapsed { --library-w: 0px; }
 @media (min-width: 931px) {
   .desk.library-collapsed .library { display: none; }
