@@ -455,12 +455,26 @@ async function selectBook(bookId, showPanel = true, openReader = false) {
     if (epoch === state.epoch) {
       state.loading = false;
       renderBook();
+      renderConversationSelect();
       schedulePoll();
       // A shelf click drops the reader straight into the book's full text;
       // background re-selects (poll, upload, reindex) keep the study panel.
       if (openReader && state.book?.status === 'ready' && state.book?.category !== 'group') await readerUI.open(state.book.id);
     }
   }
+}
+
+// History switcher: the server keeps every conversation, the select is the
+// only way back to an older one after "新对话".
+function renderConversationSelect() {
+  const select = $('#conversation-select');
+  const current = state.conversation?.id || '';
+  select.replaceChildren(new Option(state.conversations.length ? '新对话' : '暂无历史对话', ''));
+  state.conversations.forEach((item) => {
+    const date = (item.created_at || '').slice(5, 10).replace('-', '/');
+    select.add(new Option(`${item.title}（${date}）`, item.id));
+  });
+  select.value = select.querySelector(`option[value="${CSS.escape(current)}"]`) ? current : '';
 }
 
 async function selectConversation(conversationId) {
@@ -486,6 +500,7 @@ async function selectConversation(conversationId) {
   } finally {
     if (epoch === state.epoch) {
       state.loading = false;
+      renderConversationSelect();
       renderMessages();
       updateComposer();
       schedulePoll();
@@ -550,6 +565,7 @@ function updateComposer() {
     ? '回答以当前教材为主 · 勾选联网后 W 标注内容来自网络，需自行核实 · 引用仍需核对'
     : '仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见';
   $('#new-conversation').disabled = !ready || state.pending;
+  $('#conversation-select').disabled = !ready || state.pending;
   $('#delete-conversation').disabled = !ready || !state.conversation || state.pending;
   // Quiz tuning controls appear only in quiz mode.
   const quizOn = state.mode === 'quiz' && !isGroup;
@@ -1473,6 +1489,9 @@ action($('#all-review-open'), 'click', () => openReview());
 $('#review-close').addEventListener('click', () => $('#review-dialog').close());
 action($('#book-notes'), 'click', () => state.book && readerUI.open(state.book.id, { notes: true }));
 action($('#new-conversation'), 'click', () => selectConversation(''));
+$('#conversation-select').addEventListener('change', (event) => {
+  if (!state.pending) selectConversation(event.target.value);
+});
 action($('#delete-conversation'), 'click', deleteConversation);
 $('#section-select').addEventListener('change', () => {
   updateComposer();
@@ -1569,6 +1588,7 @@ $('#chat-form').addEventListener('submit', async (event) => {
     });
     const conversations = await api(`/api/books/${bookId}/conversations`);
     state.conversations = conversations.conversations;
+    renderConversationSelect();
   } catch (error) {
     const index = state.messages.indexOf(optimistic);
     if (index >= 0) state.messages.splice(index, 1);

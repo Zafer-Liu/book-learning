@@ -34,6 +34,7 @@ h1, h2, h3, p { margin: 0; }
 .text-button:hover { color: var(--blue); background: var(--blue-soft); }
 .danger, .danger:hover { color: var(--danger); }
 .square-button { width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 7px; font-size: 23px; display: grid; place-items: center; }
+.square-button svg { display: block; }
 .square-button:hover { background: var(--blue-soft); border-color: #abbff1; }
 .conversation-delete { color: var(--muted); font-size: 18px; }
 .conversation-delete:hover:not(:disabled) { color: var(--danger); background: #f7e2e3; border-color: #d9a3a5; }
@@ -74,8 +75,6 @@ h1, h2, h3, p { margin: 0; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .panel-heading h2 { font-size: 17px; font-weight: 600; margin-top: 6px; }
 .heading-buttons { display: flex; gap: 6px; }
-/* The « glyph has a generous font box; keep the collapse control optically centered. */
-#library-toggle { line-height: 1; padding: 0 0 2px; }
 .desk.library-collapsed { --library-w: 0px; }
 @media (min-width: 931px) {
   .desk.library-collapsed .library { display: none; }
@@ -165,6 +164,8 @@ h1, h2, h3, p { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .library-search-icon, .library-search-icon svg, .read-book-button, .read-book-icon { transition: none; } }
 .study-controls { display: flex; gap: 12px; padding: 0 30px 12px; border-bottom: 1px solid var(--line); align-items: flex-end; }
 .select-field { color: var(--muted); font-size: 10px; flex: 1; min-width: 0; }
+/* History titles are long; give that picker a little more room than 章节. */
+.study-controls .select-field:has(#conversation-select) { flex: 1.5; }
 .select-field select { display: block; width: 100%; margin-top: 6px; padding: 7px 8px; font-size: 11px; text-overflow: ellipsis; }
 .notice { margin: 0 30px 12px; padding: 10px 12px; font-size: 11px; line-height: 1.8; border-radius: 5px; }
 .warning { color: var(--warning); background: var(--warning-bg); }
