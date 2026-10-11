@@ -1,0 +1,11 @@
+# railway up 上传快照规则（dockerignore 语法；存在时覆盖 .gitignore）。书库不入镜像，经卷提供。
+*
+!requirements.txt
+!study/
+!study/**
+!web/
+!web/**
+!Dockerfile
+!railway.toml
+study/**/__pycache__/
+study/**/*.pyc

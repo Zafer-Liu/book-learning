@@ -7,5 +7,3 @@
 !Dockerfile
 study/**/__pycache__/
 study/**/*.pyc
-!builtin_books/
-!builtin_books/**
