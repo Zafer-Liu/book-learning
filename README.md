@@ -115,7 +115,7 @@ flowchart LR
 ## Features
 
 - **Multi-account workspace** — registration / login / one-code-one-account test codes / bring-your-own API key; PBKDF2 passwords, session cookies + CSRF. Books, conversations, annotations and source files are scoped by account *and* book.
-- **Upload & indexing** — UTF-8 `.md` / `.markdown` / `.txt` / `.docx`; heading detection; background chunk indexing (≤ 1200 chars per chunk, 160 overlap by default); 20 MB / 4 M chars per file; 20 books / 50 MB per account.
+- **Upload & indexing** — UTF-8 `.md` / `.markdown` / `.txt` / `.docx`; heading detection; background chunk indexing (≤ 1200 chars per chunk, 160 overlap by default); 50 MB / 4 M chars per file; 20 books / 200 MB per account.
 - **Four study modes** — Q&A (model-driven multi-round retrieval), chapter explanation, key-point outlining, self-testing (answers folded by default); retrieval can be narrowed to a section.
 - **Evidence-constrained generation** — as in Diagram 4: answers must stand on this turn's retrieved evidence; otherwise an explicit refusal.
 - **Automatic emphasis** — the model marks key terms, conclusions and numbers with **bold** (the only Markdown token allowed); the client renders it safely with no HTML injection.

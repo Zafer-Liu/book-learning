@@ -1417,8 +1417,8 @@ $('#upload-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = $('#book-file').files[0];
   if (!file) return;
-  if (!/\.(md|markdown|txt|docx|pdf)$/i.test(file.name) || file.size > 20 * 1024 * 1024) {
-    $('#upload-error').textContent = '请选择不超过 20 MB 的 Markdown、TXT、DOCX 或文字版 PDF 文件。';
+  if (!/\.(md|markdown|txt|docx|pdf)$/i.test(file.name) || file.size > 50 * 1024 * 1024) {
+    $('#upload-error').textContent = '请选择不超过 50 MB 的 Markdown、TXT、DOCX 或文字版 PDF 文件。';
     return;
   }
   $('#upload-submit').disabled = true;

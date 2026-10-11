@@ -77,7 +77,7 @@ def create_app(test_config=None):
     root = Path(os.getenv("STUDY_DATA_DIR") or ROOT / ".study-data").resolve()
     app.config.update(
         DATA_ROOT=root, SECRET_KEY=os.getenv("STUDY_SECRET_KEY", ""),
-        MAX_CONTENT_LENGTH=21 * 1024 * 1024,
+        MAX_CONTENT_LENGTH=51 * 1024 * 1024,
         MAX_FORM_MEMORY_SIZE=256 * 1024, MAX_FORM_PARTS=5,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
         SESSION_REFRESH_EACH_REQUEST=False,
@@ -782,8 +782,8 @@ def create_app(test_config=None):
                     abort(400, description="教材数量已达账户上限，请先删除不用的教材。")
             folder = root / "sources" / owner
             folder.mkdir(parents=True, exist_ok=True)
-            if sum(p.stat().st_size for p in folder.iterdir() if p.is_file()) >= 50 * 1024 * 1024:
-                abort(400, description="账户教材原文件已达到 50 MB 上限，请先清理。")
+            if sum(p.stat().st_size for p in folder.iterdir() if p.is_file()) >= 200 * 1024 * 1024:
+                abort(400, description="账户教材原文件已达到 200 MB 上限，请先清理。")
             if not index_slots.acquire(blocking=False):
                 abort(429, description="索引队列已满，请稍后上传。")
             reserved = True
@@ -793,13 +793,13 @@ def create_app(test_config=None):
             with source.open("xb") as output:
                 while block := file.stream.read(64 * 1024):
                     size += len(block)
-                    if size > 20 * 1024 * 1024:
-                        abort(413, description="单本教材不得超过 20 MB，请按卷拆分。")
+                    if size > 50 * 1024 * 1024:
+                        abort(413, description="单本教材不得超过 50 MB，请按卷拆分。")
                     output.write(block)
             if size == 0:
                 abort(400, description="文件为空。")
-            if sum(p.stat().st_size for p in folder.iterdir() if p.is_file()) > 50 * 1024 * 1024:
-                abort(400, description="上传后超出账户 50 MB 原文件配额，请拆分或清理。")
+            if sum(p.stat().st_size for p in folder.iterdir() if p.is_file()) > 200 * 1024 * 1024:
+                abort(400, description="上传后超出账户 200 MB 原文件配额，请拆分或清理。")
             book_lock = lock_for(book_locks, book_id)
             book_lock.acquire()
             with database.connect() as db:
