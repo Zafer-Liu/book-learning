@@ -4,3 +4,4 @@ gunicorn>=23.0.0,<24
 requests>=2.32.3,<3
 python-dotenv>=1.0.1,<2
 jieba==0.42.1
+pypdf>=4.3,<6

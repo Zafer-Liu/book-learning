@@ -2144,10 +2144,29 @@ class IsolationTests(unittest.TestCase):
             with self.db.connect() as db:
                 db.execute("INSERT INTO chunks(owner_id,book_id,ordinal,section,text) VALUES(?,?,8,'bad','bad')", (self.b_id, self.book_a))
 
-    def test_upload_rejects_pdf_and_unsafe_extensions(self):
-        response = self.a.post("/api/books", data={"file": (io.BytesIO(b"not a document"), "book.pdf")},
+    def test_upload_rejects_unsafe_extensions(self):
+        response = self.a.post("/api/books", data={"file": (io.BytesIO(b"binary"), "book.exe")},
                                headers={"X-CSRF-Token": self.a_csrf})
         self.assertEqual(response.status_code, 400)
+        response = self.a.post("/api/books", data={"file": (io.BytesIO(b"broken"), "broken.pdf")},
+                               headers={"X-CSRF-Token": self.a_csrf})
+        self.assertEqual(response.status_code, 202)  # accepted; the index job reports the parse error
+
+    def test_upload_indexes_text_pdf_with_real_page_numbers(self):
+        from test_reader import build_pdf
+        data = build_pdf([["Chapter one title", "Administrative litigation governs the court review process. " * 4],
+                          ["Second page body", "Procedure and standing requirements follow the statute. " * 4]])
+        with patch.object(self.app.extensions["index_executor"], "submit", side_effect=lambda fn, *args: fn(*args)):
+            response = self.a.post("/api/books", data={"file": (io.BytesIO(data), "book.pdf")},
+                                   headers={"X-CSRF-Token": self.a_csrf})
+        self.assertEqual(response.status_code, 202)
+        book_id = response.get_json()["book"]["id"]
+        with self.db.connect() as db:
+            rows = db.execute("SELECT ordinal,section,page FROM chunks WHERE book_id=? ORDER BY ordinal",
+                              (book_id,)).fetchall()
+        self.assertTrue(rows)
+        self.assertTrue(all(row["section"].startswith("第") and row["section"].endswith("页") for row in rows))
+        self.assertEqual(sorted({row["page"] for row in rows}), [1, 2])
 
     def test_read_requests_do_not_refresh_login_cookie(self):
         self.assertNotIn("Set-Cookie", self.a.get("/api/books").headers)

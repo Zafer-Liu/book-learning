@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-FORMATS = {".md", ".markdown", ".txt", ".docx"}
+FORMATS = {".md", ".markdown", ".txt", ".docx", ".pdf"}
 MAX_CHARS = 4_000_000
 MAX_CHUNKS = 10_000
 # Bump whenever parsing/chunking behaviour changes: stored indexes carry the
@@ -236,10 +236,57 @@ def docx_to_markdown(path: Path) -> str:
     return result
 
 
+# --- PDF (text-layer) ----------------------------------------------------
+# One section per PDF page: the page IS the structure. No heading heuristics
+# here — extraction mangles line shapes the markdown TOC logic relies on, and
+# physical page numbers are what the PDF reader view shows the user. Page text
+# is pre-normalized with _SPACED_CJK so chunk offsets (computed on normalized
+# text) match the canonical text exactly.
+PDF_MAX_PAGES = 2000
+PDF_EMPTY_PAGE_CHARS = 20
+
+
+def pdf_to_pages(path: Path) -> list[dict]:
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(path, strict=False)
+    except Exception as exc:  # corrupt container, not a real PDF
+        raise ValueError("无法读取这个 PDF 文件，请确认文件未损坏。") from exc
+    if reader.is_encrypted:
+        raise ValueError("PDF 带有密码保护，请解除限制后重新导出再上传。")
+    total = len(reader.pages)
+    if not total:
+        raise ValueError("这个 PDF 没有任何页面，无法作为教材。")
+    if total > PDF_MAX_PAGES:
+        raise ValueError("PDF 页数超过 2000，请按卷拆分后上传。")
+    pages, word_chars_total, empty = [], 0, 0
+    for index, page in enumerate(reader.pages):
+        try:
+            raw = page.extract_text() or ""
+        except Exception:  # a single unreadable page must not kill the book
+            raw = ""
+        text = raw.replace("\r\n", "\n").replace("\r", "\n")
+        word_chars = len(re.sub(r"[\W_]+", "", text))
+        word_chars_total += word_chars
+        if word_chars < PDF_EMPTY_PAGE_CHARS:
+            empty += 1
+            continue
+        pages.append({"text": _SPACED_CJK.sub("", text).strip(),
+                      "section": f"第{index + 1}页", "page": index + 1, "pdf_page": index})
+    if not pages or word_chars_total < 30 or empty > total / 2:
+        raise ValueError("这个 PDF 几乎没有可提取的文字，应该是扫描件；请先 OCR 后再上传。")
+    if sum(len(page["text"]) for page in pages) > MAX_CHARS:
+        raise ValueError("教材超过 400 万字符，请按卷拆分后上传。")
+    return pages
+
+
 def parse_document(path: Path, filename: str) -> list[dict]:
     suffix = Path(filename).suffix.lower()
     if suffix not in FORMATS:
-        raise ValueError("请上传 Markdown、TXT 或 DOCX；扫描 PDF 请先完成 OCR。")
+        raise ValueError("请上传 Markdown、TXT、DOCX 或文字版 PDF；扫描 PDF 请先完成 OCR。")
+    if suffix == ".pdf":
+        return pdf_to_pages(path)
     if suffix == ".docx":
         text = docx_to_markdown(path)
     else:

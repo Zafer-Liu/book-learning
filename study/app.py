@@ -293,12 +293,19 @@ def create_app(test_config=None):
 
     @app.get("/assets/<path:name>")
     def assets(name):
-        if name not in {"app.js", "reader.js", "styles.css", "mermaid.min.js", "share.html"}:
+        if name.startswith("vendor/pdfjs/"):
+            # Self-hosted PDF.js (pdf.min.mjs + worker + cmaps + standard
+            # fonts); anything else under vendor/ stays invisible. Flask's
+            # send_from_directory already refuses traversal, so only the
+            # prefix allowlist matters here.
+            pass
+        elif name not in {"app.js", "reader.js", "styles.css", "mermaid.min.js", "share.html"}:
             abort(404)
         response = send_from_directory(ROOT / "web", name)
         # Windows hosts may map .js/.css to text/plain via the registry, which
         # makes browsers refuse to execute the scripts; pin the MIME types.
         asset_mime = {".js": "text/javascript; charset=utf-8",
+                      ".mjs": "text/javascript; charset=utf-8",
                       ".css": "text/css; charset=utf-8"}
         suffix = "." + name.rsplit(".", 1)[-1].lower()
         if suffix in asset_mime:
@@ -749,7 +756,7 @@ def create_app(test_config=None):
             abort(400, description="请选择教材文件。")
         filename = file.filename.replace("\\", "/").split("/")[-1]
         if re.search(r"[\x00-\x1f\x7f]", filename) or len(filename) > 180 or Path(filename).suffix.lower() not in FORMATS:
-            abort(400, description="仅支持 Markdown、TXT 和 DOCX；文件名不能含控制字符且不超过 180 字符。")
+            abort(400, description="仅支持 Markdown、TXT、DOCX 或文字版 PDF；文件名不能含控制字符且不超过 180 字符。")
         title = (request.form.get("title") or Path(filename).stem).strip()[:120]
         if not title:
             abort(400, description="请输入教材名称。")
@@ -891,15 +898,20 @@ def create_app(test_config=None):
 
     @app.get("/api/books/<book_id>/source")
     def source_file(book_id):
+        inline = request.args.get("inline") == "1"
         with database.connect() as db:
             row = book_row(db, book_id)
-            require_own_book(row)
+            # Download stays owner-only; inline feeds the PDF reader view for
+            # any book the reader endpoint would show (own + builtin).
+            if not inline:
+                require_own_book(row)
             if row["category"] == "group":
                 abort(400, description="文献组没有原文件。")
         path = root / row["source_path"]
         if not path.is_file():
             abort(404, description="教材原文件不存在，请重新上传。")
-        return send_file(path, as_attachment=True, download_name=row["filename"], mimetype="text/plain")
+        mimetype = "application/pdf" if path.suffix.lower() == ".pdf" else "text/plain"
+        return send_file(path, as_attachment=not inline, download_name=row["filename"], mimetype=mimetype)
 
     @app.get("/api/books/<book_id>/chunks/<int:chunk_id>")
     def chunk_detail(book_id, chunk_id):
@@ -1781,14 +1793,19 @@ def create_app(test_config=None):
                     index_slots.release()
 
     def seed_builtin_books():
-        # Baked-in textbooks and literature ship with the image; every account
-        # can read them. Files in builtin_books/ root are textbooks; files in
-        # builtin_books/literature/ are literature. Tests disable the seeder
-        # (STUDY_SEED_BUILTIN=0) to keep index slots free and runs fast.
+        # Builtin textbooks and literature live next to the data volume
+        # (STUDY_DATA_DIR/builtin_books, uploaded out-of-band for copyright
+        # reasons — they never enter the git repo or the image); local dev
+        # still works with a repo-side builtin_books/ folder, and
+        # STUDY_BUILTIN_BOOKS_DIR can pin an explicit location. Files in the
+        # root are textbooks; files in literature/ are literature. Tests
+        # disable the seeder (STUDY_SEED_BUILTIN=0) to keep runs fast.
         if os.getenv("STUDY_SEED_BUILTIN", "1") != "1":
             return
-        folder = ROOT / "builtin_books"
-        if not folder.is_dir():
+        explicit = os.getenv("STUDY_BUILTIN_BOOKS_DIR")
+        candidates = ([Path(explicit)] if explicit else []) + [root / "builtin_books", ROOT / "builtin_books"]
+        folder = next((f for f in candidates if f.is_dir()), None)
+        if folder is None:
             return
         try:
             with database.connect() as db:

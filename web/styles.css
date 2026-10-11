@@ -475,6 +475,23 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reader-progress { display: flex; align-items: center; justify-content: center; gap: 18px; font: 10px var(--mono); color: var(--muted); padding: 4px 16px; background: var(--white); border-top: 1px solid var(--line); }
 .reader-progress .text-button { color: var(--green); font-family: var(--sans); font-size: 12px; font-weight: 600; }
 .reader-sync-status { color: var(--muted); font: 10px var(--sans); }
+
+/* --- PDF reader mode: original book pages ------------------------------- */
+.reader-shell.reader-pdf .reader-more, .reader-shell.reader-pdf .reader-type-controls { display: none; }
+.reader-shell.reader-pdf .reader-stream { max-width: none; }
+.reader-pdf-page { position: relative; margin: 0 auto 18px; background: var(--white); border: 1px solid var(--line); border-radius: 3px; box-shadow: 0 2px 10px #172b4d0f; overflow: hidden; }
+.reader-pdf-canvas { display: block; }
+.reader-pdf-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font: 11px var(--mono); background: #f7fafd; }
+.reader-pdf-error { position: absolute; right: 8px; bottom: 8px; color: var(--danger); font-size: 10px; }
+.reader-pdf-text { position: absolute; inset: 0; overflow: hidden; line-height: 1; text-align: initial; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; opacity: 0.25; }
+.reader-pdf-text ::selection { background: #315cc73d; }
+.reader-pdf-text span { color: transparent; position: absolute; white-space: pre; transform-origin: 0 0; cursor: text; }
+.reader-pdf-overlay { position: absolute; inset: 0; pointer-events: none; }
+.reader-pdf-mark { position: absolute; border-radius: 2px; pointer-events: auto; cursor: pointer; }
+.reader-pdf-mark.reader-highlight.highlight-yellow { background: #f6e7bdaa; }
+.reader-pdf-mark.reader-highlight.highlight-blue { background: #d8e5fbaa; }
+.reader-pdf-mark.reader-highlight.highlight-green { background: #d3ece5aa; }
+.reader-pdf-mark.reader-citation { background: var(--blue-soft); opacity: .75; outline: 2px solid var(--blue); outline-offset: -1px; }
 @media (max-width: 930px) {
   .desk[data-panel="evidence"] > .evidence.reader-open { display: flex; }
   .reader-notes { max-height: 45%; }

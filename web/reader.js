@@ -168,11 +168,17 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     }
   }
 
+  function releasePdf(reader) {
+    reader?.pdf?.observer?.disconnect();
+    if (reader?.pdf?.doc) reader.pdf.doc.destroy().catch(() => {});
+  }
+
   function reset() {
     if (current && !current.restoring) rememberPosition(current, true);
     if (current?.frame) cancelAnimationFrame(current.frame);
     if (current?.positionTimer) clearTimeout(current.positionTimer);
     if (current?.syncTimer) clearTimeout(current.syncTimer);
+    releasePdf(current);
     current = null;
     editor = null;
     hidePopover();
@@ -195,17 +201,23 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     if (old.positionTimer) clearTimeout(old.positionTimer);
     if (old.syncTimer) clearTimeout(old.syncTimer);
     const reader = { ...old, epoch: getEpoch(), frame: null, positionTimer: null, syncTimer: null,
-      loading: null, navigating: false,
+      loading: null, navigating: false, anchorNeedle: null,
       notesLoading: false, selection: null, highlightsPending: false };
     current = reader;
     mount(reader);
-    reader.tocSelect.replaceChildren(...reader.toc.map((item) => new Option(item.title, item.start)));
-    reader.stream.replaceChildren(...reader.blocks.map((block) => blockNode(reader, block)));
-    setScrollTop(reader, scrollTop);
+    if (reader.sourceFormat === 'pdf') {
+      // The PDF view owns canvases that cannot survive a re-mount; a fresh
+      // navigate() rebuilds page placeholders from the cached document.
+      navigate(reader, old.target || {});
+    } else {
+      reader.tocSelect.replaceChildren(...reader.toc.map((item) => new Option(item.title, item.start)));
+      reader.stream.replaceChildren(...reader.blocks.map((block) => blockNode(reader, block)));
+      setScrollTop(reader, scrollTop);
+    }
     updateEdges(reader);
     updateProgress(reader);
-    if (!reader.restoring) rememberPosition(reader);
-    if (old.navigating || !reader.version) navigate(reader, old.target || {});
+    if (reader.sourceFormat !== 'pdf' && !reader.restoring) rememberPosition(reader);
+    if (reader.sourceFormat !== 'pdf' && (old.navigating || !reader.version)) navigate(reader, old.target || {});
     loadNotes(reader);
     return true;
   }
@@ -349,6 +361,14 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function updateEdges(reader) {
+    if (reader.sourceFormat === 'pdf') {
+      reader.before.disabled = reader.after.disabled = true;
+      reader.before.textContent = '原书第 1 页';
+      reader.after.textContent = `共 ${reader.pageMap?.length || 0} 页`;
+      reader.tocSelect.disabled = !reader.version || reader.navigating;
+      reader.scroll.setAttribute('aria-busy', String(reader.navigating || Boolean(reader.loading)));
+      return;
+    }
     const first = reader.blocks[0];
     const last = reader.blocks.at(-1);
     for (const direction of ['before', 'after']) {
@@ -391,6 +411,19 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function updateProgress(reader) {
+    if (reader.sourceFormat === 'pdf') {
+      if (!reader.pageMap?.length) {
+        reader.progressText.textContent = '正在载入原书页面…';
+        return;
+      }
+      const entry = pdfTopPage(reader);
+      const atEnd = entry === reader.pageMap.at(-1)
+        && reader.scroll.scrollHeight - reader.scroll.scrollTop - reader.scroll.clientHeight < 4;
+      const index = reader.pageMap.indexOf(entry) + 1;
+      reader.progressText.textContent = `原书第 ${index} / ${reader.pageMap.length} 页 · 原书版式`;
+      reader.tocSelect.value = String(entry.start);
+      return;
+    }
     if (!reader.blocks.length) {
       reader.progressText.textContent = '全文阅读不调用模型；OCR 错误请对照源文件。';
       return;
@@ -408,6 +441,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
 
   function passageSection(reader) {
     // Chapter title covering the current viewport, for ask-context.
+    if (reader.sourceFormat === 'pdf') return pdfTopPage(reader)?.label || '';
     if (!reader.toc?.length || !reader.blocks.length) return '';
     const top = reader.scroll.getBoundingClientRect().top;
     const node = [...reader.stream.children].find((item) => item.getBoundingClientRect().bottom > top);
@@ -472,7 +506,16 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function rememberPosition(reader, force = false) {
-    if (!reader.blocks.length || !reader.version) return;
+    if (!reader.version) return;
+    if (reader.sourceFormat === 'pdf') {
+      if (!reader.pageMap?.length) return;
+      const entry = pdfTopPage(reader);
+      const atEnd = entry === reader.pageMap.at(-1)
+        && reader.scroll.scrollHeight - reader.scroll.scrollTop - reader.scroll.clientHeight < 4;
+      savePosition(reader, atEnd ? reader.length : entry.start, atEnd, force);
+      return;
+    }
+    if (!reader.blocks.length) return;
     const top = reader.scroll.getBoundingClientRect().top;
     const node = [...reader.stream.children].find((item) => item.getBoundingClientRect().bottom > top);
     const block = reader.blocks.find((item) => item.index === Number(node?.dataset.index));
@@ -551,6 +594,10 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function refreshHighlights(reader) {
+    if (reader.sourceFormat === 'pdf') {
+      refreshPdfHighlights(reader);
+      return;
+    }
     keepPosition(reader, () => {
       for (const block of reader.blocks) {
         const node = reader.stream.querySelector(`[data-index="${block.index}"] .reader-text`);
@@ -580,6 +627,249 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     updateProgress(reader);
   }
 
+  function citationNeedle(reader, anchor) {
+    const block = reader.blocks.find((item) => item.start <= anchor.start && anchor.end <= item.end);
+    return block ? block.text.slice(anchor.start - block.start, anchor.end - block.start) : null;
+  }
+
+  // --- PDF mode: original pages via self-hosted PDF.js ---------------------
+  // The server keeps one canonical text (pypdf) for chunks, citations and
+  // annotations; this view only *displays* the original pages. Client/server
+  // text can differ by whitespace, so every highlight match is folded
+  // (whitespace stripped) — the server's locate() applies the same fold.
+  let pdfjsPromise = null;
+
+  function loadPdfjs() {
+    if (!pdfjsPromise) {
+      pdfjsPromise = import('/assets/vendor/pdfjs/pdf.min.mjs').then((pdfjs) => {
+        pdfjs.GlobalWorkerOptions.workerSrc = '/assets/vendor/pdfjs/pdf.worker.min.mjs';
+        return pdfjs;
+      });
+    }
+    return pdfjsPromise;
+  }
+
+  function foldText(text) {
+    return text.replace(/\s+/g, '');
+  }
+
+  // Folded index over a rendered text layer: one entry per kept character,
+  // pointing at its DOM text node + offset so a folded match becomes a Range.
+  function foldLayer(container) {
+    let folded = '';
+    const map = [];
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const value = node.nodeValue;
+      for (let i = 0; i < value.length; i += 1) {
+        if (/\s/.test(value[i])) continue;
+        map.push({ node, offset: i });
+        folded += value[i];
+      }
+    }
+    return { folded, map };
+  }
+
+  function overlayMarks(container, overlay, ranges) {
+    // Rebuild the highlight overlay from a list of {range, className}.
+    overlay.replaceChildren();
+    const base = overlay.getBoundingClientRect();
+    for (const { range, className, note } of ranges) {
+      for (const rect of range.getClientRects()) {
+        if (!rect.width && !rect.height) continue;
+        const mark = element('div', `reader-pdf-mark ${className}`);
+        mark.style.left = `${rect.left - base.left}px`;
+        mark.style.top = `${rect.top - base.top}px`;
+        mark.style.width = `${rect.width}px`;
+        mark.style.height = `${rect.height}px`;
+        if (note) {
+          mark.title = note.note || note.quote.slice(0, 80);
+          mark.setAttribute('role', 'button');
+          mark.setAttribute('tabindex', '0');
+          const view = () => { if (window.getSelection()?.isCollapsed) openEditor(current, note); };
+          mark.addEventListener('click', view);
+          mark.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); view(); }
+          });
+        }
+        overlay.append(mark);
+      }
+    }
+  }
+
+  function pageHighlightRanges(reader, entry, layer) {
+    const ranges = [];
+    const span = (start, end) => entry.start <= end && entry.end >= start;
+    for (const note of reader.annotations) {
+      if (note.version !== reader.version || !span(note.start, note.end)) continue;
+      const { folded, map } = layer;
+      const needle = foldText(note.quote);
+      const at = folded.indexOf(needle);
+      if (at < 0 || at + needle.length > map.length) continue;
+      const from = map[at];
+      const to = map[at + needle.length - 1];
+      const range = document.createRange();
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset + 1);
+      ranges.push({ range, className: `reader-highlight highlight-${colors.has(note.color) ? note.color : 'yellow'}`, note });
+    }
+    if (reader.anchor && reader.anchorNeedle && span(reader.anchor.start, reader.anchor.end)) {
+      const { folded, map } = layer;
+      const needle = foldText(reader.anchorNeedle);
+      const at = folded.indexOf(needle);
+      if (at >= 0 && at + needle.length <= map.length) {
+        const from = map[at];
+        const to = map[at + needle.length - 1];
+        const range = document.createRange();
+        range.setStart(from.node, from.offset);
+        range.setEnd(to.node, to.offset + 1);
+        ranges.push({ range, className: 'reader-citation' });
+      }
+    }
+    return ranges;
+  }
+
+  async function mountPdf(reader) {
+    const pdf = reader.pdf || (reader.pdf = { doc: null, loadedVersion: null, observer: null });
+    reader.shell.classList.add('reader-pdf');
+    if (!pdf.doc || pdf.loadedVersion !== reader.version) {
+      reader.hint.textContent = '正在载入原书页面…';
+      const [pdfjs, response] = await Promise.all([
+        loadPdfjs(),
+        fetch(`/api/books/${reader.bookId}/source?inline=1`, { credentials: 'same-origin' }),
+      ]);
+      if (!response.ok) throw new Error('原书文件读取失败。');
+      const buffer = await response.arrayBuffer();
+      if (pdf.doc) pdf.doc.destroy().catch(() => {});
+      pdf.doc = await pdfjs.getDocument({
+        data: buffer,
+        cMapUrl: '/assets/vendor/pdfjs/cmaps/', cMapPacked: true,
+        standardFontDataUrl: '/assets/vendor/pdfjs/standard_fonts/',
+      }).promise;
+      pdf.pdfjs = pdfjs;
+      pdf.loadedVersion = reader.version;
+    }
+    if (pdf.observer) pdf.observer.disconnect();
+    pdf.observer = new IntersectionObserver((records) => {
+      for (const record of records) {
+        if (record.isIntersecting) renderPdfPage(reader, record.target);
+      }
+    }, { root: reader.scroll, rootMargin: '800px 0px' });
+    // Uniform placeholder aspect from the first page; actual renders fix up
+    // per-page heights, so mixed page sizes only wobble while loading.
+    const first = await pdf.doc.getPage(1);
+    const base = first.getViewport({ scale: 1 });
+    const width = Math.max(240, reader.scroll.clientWidth - 28);
+    pdf.scale = width / base.width;
+    const fragment = document.createDocumentFragment();
+    for (const entry of reader.pageMap) {
+      const page = element('div', 'reader-pdf-page');
+      page.dataset.pdfPage = String(entry.pdf_page);
+      page.style.aspectRatio = `${base.width} / ${base.height}`;
+      page.style.width = `${width}px`;
+      page.append(element('span', 'reader-pdf-loading', entry.label));
+      fragment.append(page);
+    }
+    reader.stream.replaceChildren(fragment);
+    reader.scroll.querySelectorAll('.reader-pdf-page').forEach((node) => pdf.observer.observe(node));
+  }
+
+  async function renderPdfPage(reader, node) {
+    const pdf = reader.pdf;
+    if (!pdf?.doc || !live(reader) || node.dataset.rendered) return;
+    const entry = reader.pageMap.find((item) => item.pdf_page === Number(node.dataset.pdfPage));
+    if (!entry) return;
+    node.dataset.rendered = 'pending';
+    try {
+      const page = await pdf.doc.getPage(entry.pdf_page + 1);
+      if (!node.isConnected) return;
+      const viewport = page.getViewport({ scale: pdf.scale });
+      const canvas = element('canvas', 'reader-pdf-canvas');
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(viewport.width * ratio);
+      canvas.height = Math.floor(viewport.height * ratio);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      const render = page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+      const textLayer = element('div', 'reader-pdf-text');
+      const overlay = element('div', 'reader-pdf-overlay');
+      node.replaceChildren(canvas, textLayer, overlay);
+      node.style.aspectRatio = '';
+      node.style.height = `${viewport.height}px`;
+      await render.promise;
+      const layer = new pdf.pdfjs.TextLayer({
+        textContentSource: page.streamTextContent(),
+        container: textLayer, viewport,
+      });
+      await layer.render();
+      node.dataset.rendered = 'done';
+      overlayMarks(node, overlay, pageHighlightRanges(reader, entry, foldLayer(textLayer)));
+    } catch (error) {
+      node.dataset.rendered = '';
+      node.append(element('span', 'reader-pdf-error', '本页渲染失败，滚动重试。'));
+    }
+  }
+
+  function refreshPdfHighlights(reader) {
+    for (const node of reader.scroll.querySelectorAll('.reader-pdf-page[data-rendered="done"]')) {
+      const entry = reader.pageMap.find((item) => item.pdf_page === Number(node.dataset.pdfPage));
+      const textLayer = node.querySelector('.reader-pdf-text');
+      const overlay = node.querySelector('.reader-pdf-overlay');
+      if (entry && textLayer && overlay) overlayMarks(node, overlay, pageHighlightRanges(reader, entry, foldLayer(textLayer)));
+    }
+  }
+
+  function pdfTopPage(reader) {
+    const top = reader.scroll.getBoundingClientRect().top;
+    const node = [...reader.scroll.querySelectorAll('.reader-pdf-page')]
+      .find((item) => item.getBoundingClientRect().bottom > top + 24);
+    const pdfPage = Number(node?.dataset.pdfPage);
+    return reader.pageMap.find((item) => item.pdf_page === pdfPage) || reader.pageMap[0];
+  }
+
+  function pdfJumpTo(reader, offset) {
+    const entry = reader.pageMap.filter((item) => item.start <= offset).at(-1) || reader.pageMap[0];
+    const node = reader.scroll.querySelector(`[data-pdf-page="${entry.pdf_page}"]`);
+    if (node) {
+      setScrollTop(reader, reader.scroll.scrollTop + node.getBoundingClientRect().top
+        - reader.scroll.getBoundingClientRect().top - 16);
+    }
+    reader.scroll.focus({ preventScroll: true });
+    updateProgress(reader);
+  }
+
+  function capturePdfSelection(reader, selection) {
+    reader.selection = null;
+    if (selection && !selection.isCollapsed && selection.rangeCount === 1) {
+      const range = selection.getRangeAt(0);
+      const page = (node) => node.nodeType === Node.ELEMENT_NODE ? node.closest?.('.reader-pdf-page')
+        : node.parentElement?.closest('.reader-pdf-page');
+      const startPage = page(range.startContainer);
+      const endPage = page(range.endContainer);
+      if (startPage && startPage === endPage && reader.stream.contains(startPage)) {
+        const quote = range.toString();
+        const entry = reader.pageMap.find((item) => item.pdf_page === Number(startPage.dataset.pdfPage));
+        if (quote && quote.trim().length >= 2 && quote.length <= 4000 && entry) {
+          reader.selection = { version: reader.version, pdf_page: entry.pdf_page, quote };
+          if (popoverArmed && !pointerDown) showPopover(reader, reader.selection);
+          reader.hint.textContent = `已在${entry.label}选中 ${quote.length} 个字符；批注由服务器精确定位。`;
+        } else if (quote.length > 4000) {
+          reader.hint.textContent = '一次最多选择 4000 个字符，请缩小选文范围。';
+        }
+      }
+    }
+    reader.annotateButton.disabled = !reader.selection;
+    reader.askButton.disabled = !reader.selection;
+    if (!reader.selection && (!selection || selection.isCollapsed)) {
+      reader.hint.textContent = reader.anchor ? '原书版式呈现；蓝色底纹为本次引用，选文可添加私人批注。'
+        : '原书版式呈现；选中文字后可添加高亮或笔记，仅自己可见。';
+      if (reader.highlightsPending) {
+        reader.highlightsPending = false;
+        refreshPdfHighlights(reader);
+      }
+    }
+  }
+
   async function navigate(reader, params) {
     if (!live(reader)) return;
     const navigation = ++reader.navigation;
@@ -602,14 +892,31 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       reader.length = data.length;
       reader.toc = data.toc;
       reader.anchor = data.anchor;
+      reader.sourceFormat = data.source_format;
+      reader.pageMap = data.pages || null;
       reader.errors = {};
       reader.tocSelect.replaceChildren(...data.toc.map((item) => new Option(item.title, item.start)));
-      reader.stream.replaceChildren(...data.blocks.map((block) => blockNode(reader, block)));
-      setScrollTop(reader, 0);
-      reader.hint.textContent = data.anchor ? '蓝色底纹为本次引用；可上下连续阅读，选文添加私人批注。' : '选中文字后，可添加高亮或笔记；仅自己可见。';
+      if (reader.sourceFormat === 'pdf') {
+        // Citation quote for the PDF highlight: the anchor slice out of the
+        // block window that the same response carried.
+        reader.anchorNeedle = reader.anchor ? citationNeedle(reader, reader.anchor) : null;
+        await mountPdf(reader);
+      } else {
+        reader.stream.replaceChildren(...data.blocks.map((block) => blockNode(reader, block)));
+        setScrollTop(reader, 0);
+      }
+      reader.hint.textContent = reader.sourceFormat === 'pdf'
+        ? '原书版式呈现；蓝色底纹为本次引用，选中文字可添加私人批注。'
+        : data.anchor ? '蓝色底纹为本次引用；可上下连续阅读，选文添加私人批注。' : '选中文字后，可添加高亮或笔记；仅自己可见。';
       renderNotes(reader);
       const target = params.at ?? data.anchor?.start ?? 0;
-      requestAnimationFrame(() => { if (live(reader) && navigation === reader.navigation) jumpTo(reader, target); });
+      if (reader.sourceFormat === 'pdf') {
+        if (!params.anchor && !('at' in params)) await pdfJumpTo(reader, 0);
+        else requestAnimationFrame(() => { if (live(reader) && navigation === reader.navigation) pdfJumpTo(reader, target); });
+      } else {
+        setScrollTop(reader, 0);
+        requestAnimationFrame(() => { if (live(reader) && navigation === reader.navigation) jumpTo(reader, target); });
+      }
       return data;
     } catch (error) {
       if (!live(reader) || navigation !== reader.navigation) return;
@@ -627,7 +934,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   async function extend(reader, direction) {
-    if (!live(reader) || reader.loading || reader.navigating || !reader.blocks.length) return;
+    if (!live(reader) || reader.sourceFormat === 'pdf' || reader.loading || reader.navigating || !reader.blocks.length) return;
     const first = reader.blocks[0].index;
     const last = reader.blocks.at(-1).index;
     if (direction === 'before' ? first === 0 : last >= reader.total - 1) return;
@@ -788,6 +1095,13 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     const reader = current;
     if (!reader || !live(reader) || $('#annotation-dialog').open || reader.navigating) {
       hidePopover();
+      return;
+    }
+    if (reader.sourceFormat === 'pdf') {
+      reader.selection = null;
+      const selection = window.getSelection();
+      if (pointerDown) hidePopover();
+      capturePdfSelection(reader, selection);
       return;
     }
     reader.selection = null;

@@ -31,13 +31,19 @@ class Snapshot:
         self.astral = array("I", (i for i, char in enumerate(self.text) if ord(char) > 0xffff))
         self.interiors = array("I", (position + i + 1 for i, position in enumerate(self.astral)))
         self.length = self.to_utf16(len(self.text))
-        self.blocks, self.toc, self.chunks = [], [], []
+        self.blocks, self.toc, self.chunks, self.pages = [], [], [], []
+        self.source_format = "pdf" if any("pdf_page" in s for s in sections) else "text"
         position = 0
         for index, section in enumerate(sections):
             text = section["text"].strip()
             section_end = position + len(text) + (2 if index + 1 < len(sections) else 0)
             self.toc.append({"title": section["section"], "start": self.to_utf16(position),
                              "index": len(self.blocks)})
+            if "pdf_page" in section:
+                # Code-point span of the page's own text; the "\n\n" separator
+                # after it belongs to the preceding page, matching block logic.
+                self.pages.append({"pdf_page": section["pdf_page"], "label": section["section"],
+                                   "cp_start": position, "cp_end": position + len(text)})
             # Inter-section separators belong to the preceding section's last block.
             while position < section_end:
                 end = min(position + BLOCK_CHARS, section_end)
@@ -57,10 +63,10 @@ class Snapshot:
         # This intentionally overcounts shared labels, keeping retained memory bounded.
         self.weight = sum(sys.getsizeof(value) for value in
                           (self.text, self.version, self.astral, self.interiors, self.starts,
-                           self.blocks, self.toc, self.chunks))
+                           self.blocks, self.toc, self.chunks, self.pages))
         self.weight += sum(sys.getsizeof(value) for value in self.starts)
         self.weight += sum(sys.getsizeof(row) + sum(sys.getsizeof(value) for value in row.values())
-                           for rows in (self.blocks, self.toc, self.chunks) for row in rows)
+                           for rows in (self.blocks, self.toc, self.chunks, self.pages) for row in rows)
 
     def to_utf16(self, position):
         return position + bisect_left(self.astral, position)
@@ -91,6 +97,48 @@ class Snapshot:
                 or span["page"] != chunk["page"] or self.text[start:end] != chunk["text"]):
             abort(409, description="引用与当前正文不一致，请重建索引。")
         return {"start": self.to_utf16(start), "end": self.to_utf16(end)}
+
+    # --- PDF page anchoring ----------------------------------------------
+    # Quotes picked in the browser's PDF.js text layer can differ from the
+    # server's pypdf extraction by line breaks and hyphenation, so locate()
+    # falls back to a whitespace-free comparison with an index map back to
+    # canonical code points.
+    @staticmethod
+    def _fold(text):
+        chars, index_map = [], array("I")
+        position = 0
+        while position < len(text):
+            char = text[position]
+            if char.isspace():
+                position += 1
+                continue
+            if char in "-­‐‑" and position + 1 < len(text) and text[position + 1] == "\n":
+                position += 2  # dehyphenated line break
+                continue
+            chars.append(char)
+            index_map.append(position)
+            position += 1
+        return "".join(chars), index_map
+
+    def locate(self, pdf_page, quote):
+        """Resolve (pdf_page, quote) to canonical code-point span; 400 on miss."""
+        if type(pdf_page) is not int:
+            abort(400, description="PDF 页码无效。")
+        for page in self.pages:
+            if page["pdf_page"] != pdf_page:
+                continue
+            haystack = self.text[page["cp_start"]:page["cp_end"]]
+            offset = haystack.find(quote)
+            if offset < 0:
+                folded_haystack, hay_map = self._fold(haystack)
+                folded_quote, _ = self._fold(quote)
+                offset = folded_haystack.find(folded_quote)
+                if offset < 0:
+                    abort(400, description="选中文字与正文范围不一致。")
+                end = hay_map[offset + len(folded_quote) - 1] + 1
+                return page["cp_start"] + hay_map[offset], page["cp_start"] + end
+            return page["cp_start"] + offset, page["cp_start"] + offset + len(quote)
+        abort(400, description="PDF 页码无效。")
 
 
 def source_stamp(path):
@@ -252,7 +300,13 @@ def register_reader_routes(app, database, root, book_row, book_lock_for, body, t
                 abort(400, description="正文块位置超出范围。")
             result = {"version": snapshot.version, "blocks": snapshot.window(start, start + count),
                       "total": len(snapshot.blocks), "length": snapshot.length, "toc": snapshot.toc,
-                      "anchor": anchor, "offset_unit": "utf-16"}
+                      "anchor": anchor, "offset_unit": "utf-16",
+                      "source_format": snapshot.source_format}
+            if snapshot.source_format == "pdf":
+                result["pages"] = [{"pdf_page": page["pdf_page"], "label": page["label"],
+                                    "start": snapshot.to_utf16(page["cp_start"]),
+                                    "end": snapshot.to_utf16(page["cp_end"])}
+                                   for page in snapshot.pages]
             with database.connect() as db:
                 progress_row = db.execute(
                     "SELECT version,start,text_length,finished,updated_at FROM reading_progress "
@@ -315,11 +369,12 @@ def register_reader_routes(app, database, root, book_row, book_lock_for, body, t
     @app.post("/api/books/<book_id>/annotations")
     def new_annotation(book_id):
         data = body()
-        if set(data) - {"version", "start", "end", "quote", "note", "color"}:
+        if set(data) - {"version", "start", "end", "pdf_page", "quote", "note", "color"}:
             abort(400, description="批注字段无效。")
         version = version_value(data.get("version"))
         start, end = data.get("start"), data.get("end")
-        if type(start) is not int or type(end) is not int or not 0 <= start < end:
+        pdf_page = data.get("pdf_page")
+        if (pdf_page is None) == (start is None and end is None):
             abort(400, description="批注范围无效。")
         quote = annotation_text(data.get("quote"), allow_empty=False)
         note = annotation_text(data.get("note", ""))
@@ -330,7 +385,20 @@ def register_reader_routes(app, database, root, book_row, book_lock_for, body, t
             snapshot, path, stamp = cache.get(book, root)
             if version != snapshot.version:
                 abort(409, description="正文版本已更新，请重新选择高亮文字。")
-            cp_start, cp_end = snapshot.to_codepoint(start), snapshot.to_codepoint(end)
+            if pdf_page is not None:
+                # PDF reader view: the server is the single matcher between the
+                # text-layer selection and the canonical text.
+                if snapshot.source_format != "pdf":
+                    abort(400, description="这本书不支持按页批注。")
+                cp_start, cp_end = snapshot.locate(pdf_page, quote)
+                # Store the canonical slice so list/drawer exact-match rendering
+                # works identically for text and PDF annotations.
+                quote = snapshot.text[cp_start:cp_end]
+                start, end = snapshot.to_utf16(cp_start), snapshot.to_utf16(cp_end)
+            else:
+                if type(start) is not int or type(end) is not int or not 0 <= start < end:
+                    abort(400, description="批注范围无效。")
+                cp_start, cp_end = snapshot.to_codepoint(start), snapshot.to_codepoint(end)
             if end - start > 4000 or snapshot.text[cp_start:cp_end] != quote:
                 abort(400, description="选中文字与正文范围不一致。")
             annotation_id, stamp_now = uid(), now()

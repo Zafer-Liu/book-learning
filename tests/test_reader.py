@@ -32,6 +32,39 @@ def utf16_slice(text, start, end):
     return text.encode("utf-16-le")[start * 2:end * 2].decode("utf-16-le")
 
 
+def build_pdf(pages_lines):
+    """Minimal text-layer PDF (Helvetica, one Tj per line); pypdf reads it back.
+
+    An empty page list yields a page with no text operators — the fixture for
+    scanned-page rejection.
+    """
+    def escaped(line):
+        return line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+    count = len(pages_lines)
+    objects = {1: "<< /Type /Catalog /Pages 2 0 R >>",
+               2: f"<< /Type /Pages /Kids [{' '.join(f'{3 + 2 * i} 0 R' for i in range(count))}] /Count {count} >>"}
+    for i, lines in enumerate(pages_lines):
+        stream = " ".join(f"BT /F1 12 Tf 72 {720 - 24 * j} Td ({escaped(line)}) Tj ET"
+                          for j, line in enumerate(lines))
+        objects[3 + 2 * i] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                              f"/Contents {4 + 2 * i} 0 R /Resources << /Font "
+                              f"<< /F1 {3 + 2 * count} 0 R >> >> >>")
+        objects[4 + 2 * i] = f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream"
+    objects[3 + 2 * count] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    for num in sorted(objects):
+        offsets[num] = len(out)
+        out += f"{num} 0 obj\n{objects[num]}\nendobj\n".encode("ascii")
+    xref_position = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    out += "".join(f"{offsets[num]:010d} 00000 n \n" for num in range(1, len(objects) + 1)).encode()
+    out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_position}\n%%EOF").encode()
+    return bytes(out)
+
+
 class CanonicalTests(unittest.TestCase):
     def test_long_section_is_partitioned_without_overlap(self):
         sections = [{"section": "Long", "text": "  " + "alpha " * 2000 + "  ", "page": None}]
@@ -150,7 +183,10 @@ class ReaderApiTests(unittest.TestCase):
         content = content if content is not None else "# Chapter\n\n" + "The complete original textbook. " * 120
         book_id = uid()
         path = self.root / (book_id + Path(filename).suffix)
-        path.write_text(content, encoding="utf-8", newline="\n")
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(content, encoding="utf-8", newline="\n")
         sections = parse_document(path, filename)
         chunks = split_sections(sections)
         with self.db.connect() as db:
@@ -444,6 +480,93 @@ class ReaderApiTests(unittest.TestCase):
             self.assertEqual(self.reader(book_id, anchor=ids[0]).status_code, 409)
             with self.db.connect() as db:
                 db.execute(f"UPDATE chunks SET {column}=? WHERE id=?", (old, ids[0]))
+
+    PDF_PAGES = [["Chapter one title", "Administrative litigation governs the court review process. " * 4],
+                 ["Second page body", "Procedure and standing requirements follow the statute. " * 4]]
+
+    def pdf_book(self, pages_lines=None, owner=None):
+        return self.book(build_pdf(pages_lines if pages_lines is not None else self.PDF_PAGES),
+                         owner=owner, filename="source.pdf")
+
+    def test_pdf_page_map_blocks_and_offset_consistency(self):
+        book_id, path, sections, ids = self.pdf_book()
+        self.assertEqual([(s["section"], s["page"], s["pdf_page"]) for s in sections],
+                         [("第1页", 1, 0), ("第2页", 2, 1)])
+        reading = self.reader(book_id).get_json()
+        self.assertEqual(reading["source_format"], "pdf")
+        self.assertEqual(reading["pages"][0]["start"], 0)
+        self.assertEqual(reading["pages"][-1]["end"], reading["length"])
+        for entry in reading["pages"]:
+            self.assertEqual(entry["pdf_page"], 0 if entry["label"] == "第1页" else 1)
+        # The citation contract is untouched: chunk spans slice the canonical
+        # text exactly and the anchor resolves inside the mapped page.
+        canonical = "\n\n".join(s["text"].strip() for s in sections)
+        for chunk in split_sections(sections, include_offsets=True):
+            self.assertEqual(canonical[chunk["source_start"]:chunk["source_end"]], chunk["text"])
+        self.assertEqual(self.reader(book_id, anchor=ids[0]).get_json()["anchor"]["start"], 0)
+
+    def test_pdf_anchor_mismatch_is_rejected(self):
+        book_id, _, _, ids = self.pdf_book()
+        self.reader(book_id)  # warm the snapshot cache first
+        for column, value in (("page", 99), ("section", "wrong"), ("text", "wrong")):
+            with self.db.connect() as db:
+                old = db.execute(f"SELECT {column} FROM chunks WHERE id=?", (ids[0],)).fetchone()[0]
+                db.execute(f"UPDATE chunks SET {column}=? WHERE id=?", (value, ids[0]))
+            self.assertEqual(self.reader(book_id, anchor=ids[0]).status_code, 409)
+            with self.db.connect() as db:
+                db.execute(f"UPDATE chunks SET {column}=? WHERE id=?", (old, ids[0]))
+
+    def test_annotation_via_pdf_page_round_trip(self):
+        book_id, path, sections, _ = self.pdf_book()
+        reading = self.reader(book_id).get_json()
+        page_two_text = sections[1]["text"]
+        quote = page_two_text[:40]
+        # The browser text layer may insert line breaks the server extraction
+        # lacks; folded matching must still resolve the selection. Whitespace
+        # the selection swallowed past the last matched character is not part
+        # of the canonical slice, hence the rstrip.
+        stored_quote = quote.rstrip()
+        spread = quote.replace("\n", "  \n")
+        payload = {"version": reading["version"], "pdf_page": 1, "quote": spread,
+                   "note": "page note", "color": "green"}
+        response = self.create_annotation(book_id, payload)
+        self.assertEqual(response.status_code, 201)
+        annotation = response.get_json()["annotation"]
+        # Stored as the canonical slice, single storage model.
+        self.assertEqual(annotation["quote"], stored_quote)
+        self.assertEqual(annotation["start"], 0 + utf16(sections[0]["text"]) + 2)
+        self.assertEqual(annotation["end"], annotation["start"] + utf16(stored_quote))
+        listed = self.annotations(book_id).get_json()["annotations"]
+        self.assertEqual([row["id"] for row in listed], [annotation["id"]])
+        # A selection that exists nowhere on the page is rejected.
+        bad = self.create_annotation(book_id, {**payload, "quote": "not in this book at all"})
+        self.assertEqual(bad.status_code, 400)
+        # Page-anchored payloads are meaningless for text books.
+        text_book, _, _, _ = self.book()
+        text_reading = self.reader(text_book).get_json()
+        wrong = {"version": text_reading["version"], "pdf_page": 0, "quote": "The complete original"}
+        self.assertEqual(self.create_annotation(text_book, wrong).status_code, 400)
+        # Both modes at once (or neither) is invalid.
+        both = {"version": reading["version"], "pdf_page": 1, "start": 0, "end": 5, "quote": quote}
+        self.assertEqual(self.create_annotation(book_id, both).status_code, 400)
+
+    def test_pdf_scanned_pages_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "scan.pdf"
+            path.write_bytes(build_pdf([[], [], []]))
+            with self.assertRaises(ValueError) as caught:
+                parse_document(path, "scan.pdf")
+            self.assertIn("OCR", str(caught.exception))
+
+    def test_source_endpoint_serves_pdf_inline(self):
+        book_id, _, _, _ = self.pdf_book()
+        download = self.a.get(f"/api/books/{book_id}/source")
+        self.assertEqual(download.mimetype, "application/pdf")
+        self.assertIn("attachment", download.headers.get("Content-Disposition", ""))
+        inline = self.a.get(f"/api/books/{book_id}/source?inline=1")
+        self.assertEqual(inline.mimetype, "application/pdf")
+        self.assertNotIn("attachment", inline.headers.get("Content-Disposition", ""))
+        self.assertEqual(inline.status_code, 200)
 
     def test_missing_source_and_not_ready_still_allow_annotation_management(self):
         book_id, path, _, _ = self.book()
