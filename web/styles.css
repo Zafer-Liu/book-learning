@@ -482,7 +482,7 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reader-sync-status { color: var(--muted); font: 10px var(--sans); }
 
 /* --- PDF reader mode: original book pages ------------------------------- */
-.reader-shell.reader-pdf .reader-more, .reader-shell.reader-pdf .reader-type-controls { display: none; }
+.reader-shell.reader-pdf .reader-more { display: none; }
 .reader-shell.reader-pdf .reader-stream { max-width: none; }
 .reader-pdf-page { position: relative; margin: 0 auto 18px; background: var(--white); border: 1px solid var(--line); border-radius: 3px; box-shadow: 0 2px 10px #172b4d0f; overflow: hidden; }
 .reader-pdf-canvas { display: block; }

@@ -34,6 +34,13 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   } catch { /* Reading remains available when storage is blocked. */ }
 
   function updateType(reader) {
+    if (reader.sourceFormat === 'pdf' && reader.pdf) {
+      reader.shell.style.removeProperty('--reader-font-size');
+      reader.typeValue.textContent = `${Math.round((reader.pdf.zoom || 1) * 100)}%`;
+      reader.typeSmaller.disabled = zoomSteps[0] === (reader.pdf.zoom || 1);
+      reader.typeLarger.disabled = zoomSteps.at(-1) === (reader.pdf.zoom || 1);
+      return;
+    }
     reader.shell.style.setProperty('--reader-font-size', `${typeSteps[typeStep]}px`);
     reader.typeValue.textContent = `${typeSteps[typeStep]}px`;
     reader.typeSmaller.disabled = typeStep === 0;
@@ -41,6 +48,16 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function changeType(reader, delta) {
+    if (reader.sourceFormat === 'pdf' && reader.pdf) {
+      const current = reader.pdf.zoom || 1;
+      const index = Math.max(0, Math.min(zoomSteps.length - 1, zoomSteps.indexOf(current) + delta));
+      reader.pdf.zoom = zoomSteps[index];
+      try { localStorage.setItem('study.reader.pdfZoom', String(reader.pdf.zoom)); }
+      catch { /* The setting still works for this visit. */ }
+      updateType(reader);
+      relayoutPdf(reader);
+      return;
+    }
     typeStep = Math.max(0, Math.min(typeSteps.length - 1, typeStep + delta));
     updateType(reader);
     try { localStorage.setItem('study.reader.fontSize', String(typeSteps[typeStep])); }
@@ -170,6 +187,8 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
 
   function releasePdf(reader) {
     reader?.pdf?.observer?.disconnect();
+    reader?.pdf?.resizeObserver?.disconnect();
+    clearTimeout(reader?.pdf?.relayoutTimer);
     if (reader?.pdf?.doc) reader.pdf.doc.destroy().catch(() => {});
   }
 
@@ -729,8 +748,59 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     return ranges;
   }
 
+  // Page width: fit the pane but cap it so a maximized/fullscreen window
+  // does not blow pages up to wall size; the A−/A+ controls scale around it.
+  const PDF_MAX_WIDTH = 860;
+  const zoomSteps = [0.7, 0.85, 1, 1.2, 1.45];
+
+  function pdfPageWidth(reader) {
+    const fit = Math.max(240, reader.scroll.clientWidth - 28);
+    return Math.min(fit, PDF_MAX_WIDTH) * (reader.pdf?.zoom || 1);
+  }
+
+  function relayoutPdf(reader) {
+    const pdf = reader.pdf;
+    if (!pdf?.doc || !pdf.base) return;
+    const width = pdfPageWidth(reader);
+    pdf.scale = width / pdf.base.width;
+    for (const node of reader.scroll.querySelectorAll('.reader-pdf-page')) {
+      node.style.width = `${width}px`;
+      // Rendered pages keep their aspect until the next render catches up;
+      // placeholders shrink immediately via aspect-ratio.
+      if (node.dataset.rendered === 'done') {
+        node.dataset.rendered = '';
+        node.style.aspectRatio = `${pdf.base.width} / ${pdf.base.height}`;
+        node.style.height = '';
+        node.replaceChildren(element('span', 'reader-pdf-loading'));
+        // Re-observe: an unchanged, still-intersecting box never re-fires the
+        // observer, so the reset page would stay a placeholder forever.
+        pdf.observer?.unobserve(node);
+        pdf.observer?.observe(node);
+      }
+    }
+  }
+
+  function scheduleRelayout(reader) {
+    clearTimeout(reader.pdf?.relayoutTimer);
+    reader.pdf.relayoutTimer = setTimeout(() => {
+      if (!live(reader)) return;
+      // Entering/leaving focus mode briefly reports transitional pane widths;
+      // applying one would shrink the pages to a sliver, so ignore them.
+      if (reader.scroll.clientWidth < 320) return;
+      relayoutPdf(reader);
+    }, 250);
+  }
+
   async function mountPdf(reader) {
-    const pdf = reader.pdf || (reader.pdf = { doc: null, loadedVersion: null, observer: null });
+    if (!reader.pdf) {
+      let zoom = 1;
+      try {
+        const saved = Number(localStorage.getItem('study.reader.pdfZoom'));
+        if (zoomSteps.includes(saved)) zoom = saved;
+      } catch { /* Reading remains available when storage is blocked. */ }
+      reader.pdf = { doc: null, loadedVersion: null, observer: null, zoom };
+    }
+    const pdf = reader.pdf;
     reader.shell.classList.add('reader-pdf');
     if (!pdf.doc || pdf.loadedVersion !== reader.version) {
       reader.hint.textContent = '正在载入原书页面…';
@@ -755,11 +825,24 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
         if (record.isIntersecting) renderPdfPage(reader, record.target);
       }
     }, { root: reader.scroll, rootMargin: '800px 0px' });
+    // Fullscreen enter/exit and pane resizes re-fit the pages.
+    pdf.resizeObserver?.disconnect();
+    pdf.resizeObserver = new ResizeObserver(() => scheduleRelayout(reader));
+    pdf.resizeObserver.observe(reader.scroll);
+    // The observer can miss the settled size after a fullscreen transition
+    // (transitional widths are skipped above), so re-measure explicitly.
+    if (!pdf.layoutListeners) {
+      pdf.layoutListeners = true;
+      const resettle = () => { if (current?.pdf && live(current)) setTimeout(() => scheduleRelayout(current), 400); };
+      window.addEventListener('resize', resettle);
+      document.addEventListener('fullscreenchange', resettle);
+    }
     // Uniform placeholder aspect from the first page; actual renders fix up
     // per-page heights, so mixed page sizes only wobble while loading.
     const first = await pdf.doc.getPage(1);
     const base = first.getViewport({ scale: 1 });
-    const width = Math.max(240, reader.scroll.clientWidth - 28);
+    pdf.base = { width: base.width, height: base.height };
+    const width = pdfPageWidth(reader);
     pdf.scale = width / base.width;
     const fragment = document.createDocumentFragment();
     for (const entry of reader.pageMap) {
@@ -772,6 +855,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     }
     reader.stream.replaceChildren(fragment);
     reader.scroll.querySelectorAll('.reader-pdf-page').forEach((node) => pdf.observer.observe(node));
+    updateType(reader);
   }
 
   async function renderPdfPage(reader, node) {
