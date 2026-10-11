@@ -1388,6 +1388,45 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["conversation"]["id"]
 
+    def test_builtin_book_delete_hides_for_account_only(self):
+        with self.db.connect() as db:
+            db.execute("INSERT OR IGNORE INTO users(id,username,username_key,password_hash,created_at) VALUES(?,?,?,?,?)",
+                       (BUILTIN_OWNER, "builtin", "builtin", "unused", now()))
+        builtin, _ = self.seed_book(BUILTIN_OWNER, "内置书甲", "内置教材的正文内容。")
+        other_client, other_id, other_csrf = self.register("shelf_other")
+        listed_ids = lambda client: {book["id"] for book in client.get("/api/books").get_json()["books"]}
+        self.assertIn(builtin, listed_ids(self.a))
+        self.assertIn(builtin, listed_ids(other_client))
+        # Deleting a builtin book hides it for THIS account only.
+        response = self.a.delete(f"/api/books/{builtin}", headers={"X-CSRF-Token": self.a_csrf})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["hidden"])
+        self.assertNotIn(builtin, listed_ids(self.a))
+        self.assertIn(builtin, listed_ids(other_client))
+        self.assertEqual(self.a.get("/api/books").get_json()["hidden_builtin"], 1)
+        self.assertEqual(other_client.get("/api/books").get_json()["hidden_builtin"], 0)
+        # Restore brings it back.
+        restored = self.a.post("/api/books/restore-builtin", json={}, headers={"X-CSRF-Token": self.a_csrf})
+        self.assertEqual(restored.get_json()["restored"], 1)
+        self.assertIn(builtin, listed_ids(self.a))
+
+    def test_own_book_delete_removes_everything(self):
+        book, _ = self.seed_book(self.a_id, "待删教材", "即将被删除的正文。")
+        conversation = self.conversation(book)
+        with self.db.connect() as db:
+            db.execute("INSERT INTO annotations(id,book_id,owner_id,version,start,end,quote,note,color,created_at,updated_at) "
+                       "VALUES(?,?,?,?,?,?, '摘文', '', 'yellow', ?, ?)",
+                       (uid(), book, self.a_id, "v1", 0, 3, now(), now()))
+        response = self.a.delete(f"/api/books/{book}", headers={"X-CSRF-Token": self.a_csrf})
+        self.assertEqual(response.status_code, 200)
+        with self.db.connect() as db:
+            remaining = db.execute("SELECT count(*) FROM books WHERE id=?", (book,)).fetchone()[0]
+            chunks = db.execute("SELECT count(*) FROM chunks WHERE book_id=?", (book,)).fetchone()[0]
+            convs = db.execute("SELECT count(*) FROM conversations WHERE id=?", (conversation,)).fetchone()[0]
+            notes = db.execute("SELECT count(*) FROM annotations WHERE book_id=?", (book,)).fetchone()[0]
+        self.assertEqual((remaining, chunks, convs, notes), (0, 0, 0, 0))
+        self.assertNotIn(book, {item["id"] for item in self.a.get("/api/books").get_json()["books"]})
+
     def chat_events(self, book, cid, payload):
         response = self.a.post(f"/api/books/{book}/conversations/{cid}/messages", json=payload,
                                headers={"X-CSRF-Token": self.a_csrf})

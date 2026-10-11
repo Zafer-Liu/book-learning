@@ -734,19 +734,26 @@ def create_app(test_config=None):
         if category and category not in ("textbook", "literature"):
             abort(400, description="分类参数无效。")
         with database.connect() as db:
+            hidden = "NOT EXISTS (SELECT 1 FROM hidden_books h WHERE h.book_id=books.id AND h.user_id=?)"
             if category:
-                rows = db.execute("SELECT * FROM books WHERE owner_id IN (?, ?) AND category=? ORDER BY created_at DESC",
-                                  (g.user["id"], BUILTIN_OWNER, category)).fetchall()
+                rows = db.execute(f"SELECT * FROM books WHERE owner_id IN (?, ?) AND category=? AND {hidden} "
+                                  "ORDER BY created_at DESC",
+                                  (g.user["id"], BUILTIN_OWNER, category, g.user["id"])).fetchall()
             else:
-                rows = db.execute("SELECT * FROM books WHERE owner_id IN (?, ?) AND category != 'group' ORDER BY created_at DESC",
-                                  (g.user["id"], BUILTIN_OWNER)).fetchall()
+                rows = db.execute(f"SELECT * FROM books WHERE owner_id IN (?, ?) AND category != 'group' AND {hidden} "
+                                  "ORDER BY created_at DESC",
+                                  (g.user["id"], BUILTIN_OWNER, g.user["id"])).fetchall()
+            hidden_builtin = db.execute(
+                "SELECT count(*) FROM hidden_books h JOIN books b ON b.id=h.book_id "
+                "WHERE h.user_id=? AND b.owner_id=?", (g.user["id"], BUILTIN_OWNER)).fetchone()[0]
             due = review_due_by_book(db)
             progress_rows = db.execute(
                 "SELECT book_id,version,start,text_length,finished,updated_at "
                 "FROM reading_progress WHERE owner_id=?", (g.user["id"],)).fetchall()
             progress = {item["book_id"]: public_reading_progress(item) for item in progress_rows}
         return jsonify(books=[{**public_book(row), "review_due": due.get(row["id"], 0),
-                               "reading_progress": progress.get(row["id"])} for row in rows])
+                               "reading_progress": progress.get(row["id"])} for row in rows],
+                       hidden_builtin=hidden_builtin)
 
     @app.post("/api/books")
     def upload():
@@ -853,7 +860,14 @@ def create_app(test_config=None):
     def delete_book(book_id):
         with database.connect() as db:
             row = book_row(db, book_id)
-            require_own_book(row)
+            if row["owner_id"] == BUILTIN_OWNER:
+                # Builtin books belong to the deployment: "deleting" one only
+                # hides it from this account's shelf.
+                if row["category"] == "group":
+                    abort(400, description="文献组没有原文件。")
+                db.execute("INSERT OR IGNORE INTO hidden_books(user_id,book_id,hidden_at) VALUES(?,?,?)",
+                           (g.user["id"], book_id, now()))
+                return jsonify(ok=True, hidden=True)
         book_lock = lock_for(book_locks, book_id)
         if not book_lock.acquire(blocking=False):
             abort(409, description="教材正在索引或回答问题，请稍后删除。")
@@ -866,6 +880,13 @@ def create_app(test_config=None):
         finally:
             book_lock.release()
         return jsonify(ok=True)
+
+    @app.post("/api/books/restore-builtin")
+    def restore_builtin_books():
+        with database.connect() as db:
+            restored = db.execute("DELETE FROM hidden_books WHERE user_id=? RETURNING book_id",
+                                  (g.user["id"],)).fetchall()
+        return jsonify(ok=True, restored=len(restored))
 
     @app.post("/api/books/<book_id>/reindex")
     def reindex(book_id):

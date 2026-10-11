@@ -115,6 +115,11 @@ h1, h2, h3, p { margin: 0; }
 .book-item { width: 100%; display: flex; align-items: start; gap: 12px; text-align: left; padding: 13px 10px; border-radius: 8px; margin-bottom: 6px; border: 1px solid transparent; }
 .book-item:hover { background: #eaf0f8; }
 .book-item.active { background: var(--white); border-color: var(--line); box-shadow: 0 2px 5px #172b4d05; }
+/* Nested interactive span (book items are buttons; buttons cannot nest). */
+.book-delete { position: absolute; top: 2px; right: 4px; display: none; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; }
+.book-item { position: relative; }
+.book-item:hover .book-delete, .book-delete:focus-visible { display: grid; }
+.book-delete:hover { color: var(--danger); background: #f7e2e3; }
 .book-spine { flex: 0 0 30px; height: 40px; display: grid; place-items: center; border-radius: 2px 5px 5px 2px; border: 1px solid #c6d1e4; border-left: 3px solid #90a3c8; color: #60789e; font: 14px var(--serif); background: #e6ecf5; }
 .book-item.active .book-spine { background: var(--blue-soft); color: var(--blue); border-left-color: var(--blue); }
 .book-info { flex: 1; min-width: 0; }

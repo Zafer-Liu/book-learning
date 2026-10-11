@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS books (
     UNIQUE(owner_id, id)
 );
 CREATE INDEX IF NOT EXISTS books_owner ON books(owner_id, created_at);
+-- Builtin books are deployment-wide; hiding one is a per-account overlay,
+-- never a row deletion. Restoring simply drops the overlay row.
+CREATE TABLE IF NOT EXISTS hidden_books (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    hidden_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, book_id)
+);
 CREATE TABLE IF NOT EXISTS group_members (
     group_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
     book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,

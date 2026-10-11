@@ -338,17 +338,7 @@ function renderLibrary() {
       list.append(button);
     });
     filtered.forEach((book) => {
-      const button = element('button', `book-item${state.book?.id === book.id ? ' active' : ''}`);
-      button.setAttribute('aria-pressed', String(state.book?.id === book.id));
-      const info = element('span', 'book-info');
-      const name = element('span', 'book-name', book.title);
-      if (book.builtin) name.append(element('span', 'book-badge', '内置'));
-      info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
-        bookMeta(book)));
-      appendReadingProgress(info, book);
-      button.append(element('span', 'book-spine', book.title.slice(0, 1) || '文'), info);
-      action(button, 'click', () => selectBook(book.id, true, true));
-      list.append(button);
+      list.append(bookItem(book, '文'));
     });
   } else {
     const allBooks = state.books.filter((book) => (book.category || 'textbook') === state.category);
@@ -360,18 +350,61 @@ function renderLibrary() {
       return;
     }
     filtered.forEach((book) => {
-      const button = element('button', `book-item${state.book?.id === book.id ? ' active' : ''}`);
-      button.setAttribute('aria-pressed', String(state.book?.id === book.id));
-      const info = element('span', 'book-info');
-      const name = element('span', 'book-name', book.title);
-      if (book.builtin) name.append(element('span', 'book-badge', '内置'));
-      info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`,
-        bookMeta(book)));
-      appendReadingProgress(info, book);
-      button.append(element('span', 'book-spine', book.title.slice(0, 1) || '书'), info);
-      action(button, 'click', () => selectBook(book.id, true, true));
-      list.append(button);
+      list.append(bookItem(book, '书'));
     });
+  }
+  // Hidden builtin books can be brought back in one tap from the shelf footer.
+  $('#builtin-restore').hidden = !state.hiddenBuiltin;
+  $('#builtin-restore').textContent = `恢复已隐藏的内置书 · ${state.hiddenBuiltin}`;
+}
+
+function bookItem(book, spineText) {
+  const button = element('button', `book-item${state.book?.id === book.id ? ' active' : ''}`);
+  button.setAttribute('aria-pressed', String(state.book?.id === book.id));
+  const info = element('span', 'book-info');
+  const name = element('span', 'book-name', book.title);
+  if (book.builtin) name.append(element('span', 'book-badge', '内置'));
+  info.append(name, element('span', `book-meta${book.status === 'error' ? ' error' : ''}`, bookMeta(book)));
+  appendReadingProgress(info, book);
+  button.append(element('span', 'book-spine', book.title.slice(0, 1) || spineText), info);
+  // A span, not a button: book items are buttons themselves and cannot nest.
+  const remove = element('span', 'book-delete');
+  remove.setAttribute('role', 'button');
+  remove.setAttribute('tabindex', '0');
+  remove.setAttribute('aria-label', book.builtin ? `从书架隐藏《${book.title}》` : `删除《${book.title}》`);
+  remove.textContent = '×';
+  const trigger = (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    removeBook(book);
+  };
+  remove.addEventListener('click', trigger);
+  remove.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') trigger(event);
+  });
+  button.append(remove);
+  action(button, 'click', () => selectBook(book.id, true, true));
+  return button;
+}
+
+async function removeBook(book) {
+  if (state.pending) { toast('正在回答问题，请稍后再操作。'); return; }
+  const message = book.builtin
+    ? `从你的书架隐藏内置教材《${book.title}》？其他账户不受影响，可随时在书架底部恢复。`
+    : `删除《${book.title}》？对话、批注、阅读进度和原文件将一并删除，无法恢复。`;
+  if (!confirm(message)) return;
+  try {
+    const data = await api(`/api/books/${book.id}`, { method: 'DELETE' });
+    if (state.book?.id === book.id) {
+      invalidate();
+      state.book = null;
+      state.messages = [];
+      renderBook();
+    }
+    await refreshBooks();
+    toast(data.hidden ? '内置教材已从你的书架隐藏。' : '教材已删除。');
+  } catch (error) {
+    showError(error);
   }
 }
 
@@ -384,9 +417,10 @@ function schedulePoll() {
 }
 
 async function refreshBooks() {
-  const [{ books }, { groups }] = await Promise.all([api('/api/books'), api('/api/groups')]);
+  const [{ books, hidden_builtin: hiddenBuiltin }, { groups }] = await Promise.all([api('/api/books'), api('/api/groups')]);
   state.books = books;
   state.groups = groups || [];
+  state.hiddenBuiltin = hiddenBuiltin || 0;
   state.reviewDueTotal = [...state.books, ...state.groups]
     .reduce((sum, book) => sum + (book.review_due || 0), 0);
   renderLibrary();
@@ -1314,6 +1348,12 @@ document.querySelectorAll('.library-tab').forEach((tab) => {
   tab.addEventListener('click', () => setCategory(tab.dataset.category));
 });
 
+$('#library-search-input').addEventListener('focus', function unlockSearch() {
+  // Chrome/Edge ignore autocomplete="off" for sign-in autofill and drop the
+  // account name into the first editable field after login. Starting readonly
+  // keeps the heuristics away; the first focus lifts it for real typing.
+  if (this.readOnly) { this.readOnly = false; this.focus(); }
+});
 $('#library-search-input').addEventListener('input', renderLibrary);
 $('#library-search-input').addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && event.currentTarget.value) {
@@ -1321,8 +1361,17 @@ $('#library-search-input').addEventListener('keydown', (event) => {
     renderLibrary();
   }
 });
-$('#library-search-clear').addEventListener('click', () => {
-  $('#library-search-input').value = '';
+$('#builtin-restore').addEventListener('click', async () => {
+  try {
+    const data = await api('/api/books/restore-builtin', { method: 'POST', body: {} });
+    await refreshBooks();
+    toast(data.restored ? `已恢复 ${data.restored} 本内置书。` : '没有已隐藏的内置书。');
+  } catch (error) {
+    showError(error);
+  }
+});
+
+$('#library-search-clear').addEventListener('click', () => {  $('#library-search-input').value = '';
   renderLibrary();
   $('#library-search-input').focus();
 });

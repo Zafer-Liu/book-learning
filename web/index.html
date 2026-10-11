@@ -54,7 +54,7 @@
         <div class="library-tabs" role="tablist" aria-label="书架分类"><button role="tab" data-category="textbook" aria-selected="true" class="library-tab active">教材</button><button role="tab" data-category="literature" aria-selected="false" class="library-tab">文献</button></div>
         <div class="library-search">
           <label for="library-search-input" class="sr-only">搜索当前分类中的书籍</label>
-          <input id="library-search-input" type="search" autocomplete="off" placeholder="搜索书名或文献组" aria-controls="book-list" aria-describedby="library-search-status">
+          <input id="library-search-input" type="search" name="library-search" autocomplete="off" placeholder="搜索书名或文献组" aria-controls="book-list" aria-describedby="library-search-status" readonly>
           <span class="library-search-icon" aria-hidden="true"><svg class="search-glass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m16 16 5 5"></path></svg><svg class="search-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10 5-7 7 7 7M3 12h18"></path></svg></span>
           <button id="library-search-clear" class="library-search-clear" type="button" aria-label="清空书架搜索" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"></path></svg></button>
         </div>
@@ -63,7 +63,7 @@
         <div id="group-bar" class="group-bar" hidden><button id="create-group-open" class="outline-button small">新建文献组</button></div>
         <p class="library-hint">切一本书，开启一段独立学习。</p>
         <div id="book-list" class="book-list"></div>
-        <div class="library-bottom"><span class="status-dot"></span><span>账户独立存储 · 单书限定检索</span></div>
+        <div class="library-bottom"><span class="status-dot"></span><span>账户独立存储 · 单书限定检索</span><button id="builtin-restore" class="text-button" type="button" hidden>恢复已隐藏的内置书</button></div>
       </aside>
       <section id="study-panel" class="study panel" aria-label="学习对话">
         <div id="reader-chat-bar" class="reader-chat-bar" hidden>
