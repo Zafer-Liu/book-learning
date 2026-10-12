@@ -438,6 +438,14 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       const entry = pdfTopPage(reader);
       const atEnd = entry === reader.pageMap.at(-1)
         && reader.scroll.scrollHeight - reader.scroll.scrollTop - reader.scroll.clientHeight < 4;
+      // Self-heal: if the visible page somehow stayed a placeholder (an
+      // observer miss, a swallowed error), kick a render — throttled so a
+      // genuinely broken page cannot spin.
+      const visible = reader.scroll.querySelector(`[data-pdf-page="${entry.pdf_page}"]`);
+      if (visible && !visible.dataset.rendered && Date.now() - (visible.__kick || 0) > 1500) {
+        visible.__kick = Date.now();
+        renderPdfPage(reader, visible);
+      }
       const index = reader.pageMap.indexOf(entry) + 1;
       reader.progressText.textContent = `原书第 ${index} / ${reader.pageMap.length} 页 · 原书版式`;
       reader.tocSelect.value = String(entry.start);
@@ -781,6 +789,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
         // blank canvas behind — cancel it before resetting the page.
         node.__task?.cancel?.();
         node.__task = null;
+        node.__renderId = (node.__renderId || 0) + 1;
         node.dataset.rendered = '';
         node.style.aspectRatio = `${pdf.base.width} / ${pdf.base.height}`;
         node.style.height = '';
@@ -845,6 +854,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
           // megabytes each, and a long book otherwise accumulates them all.
           record.target.__task?.cancel?.();
           record.target.__task = null;
+          record.target.__renderId = (record.target.__renderId || 0) + 1;
           record.target.dataset.rendered = '';
           record.target.style.aspectRatio = `${pdf.base.width} / ${pdf.base.height}`;
           record.target.style.height = '';
@@ -891,9 +901,15 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     const entry = reader.pageMap.find((item) => item.pdf_page === Number(node.dataset.pdfPage));
     if (!entry) return;
     node.dataset.rendered = 'pending';
+    // A relayout/eviction can reset the page mid-render (placeholder swapped
+    // back in). Each attempt carries a token; waking up after an await with
+    // a stale token must NOT mark the reset page as rendered — that left
+    // permanently-white "done" pages.
+    const attempt = (node.__renderId = (node.__renderId || 0) + 1);
+    const ours = () => node.__renderId === attempt && node.dataset.rendered === 'pending' && node.isConnected;
     try {
       const page = await pdf.doc.getPage(entry.pdf_page + 1);
-      if (!node.isConnected || node.dataset.rendered === '') return;
+      if (!ours()) return;
       const viewport = page.getViewport({ scale: pdf.scale });
       const canvas = element('canvas', 'reader-pdf-canvas');
       // Render sharp, but cap the backing store: full devicePixelRatio on
@@ -913,11 +929,13 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       node.style.aspectRatio = '';
       node.style.height = `${viewport.height}px`;
       await render.promise;
+      if (!ours()) { render.cancel?.(); return; }
       const layer = new pdf.pdfjs.TextLayer({
         textContentSource: page.streamTextContent(),
         container: textLayer, viewport,
       });
       await layer.render();
+      if (!ours()) return;
       node.dataset.rendered = 'done';
       node.__task = null;
       // Skip the folded-highlight computation entirely on pages with nothing
@@ -927,8 +945,9 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       }
     } catch (error) {
       node.__task = null;
-      // A cancelled render (page reset by a relayout) is not a failure.
-      if (node.dataset.rendered === '') return;
+      // A cancelled or superseded render (page reset by relayout/eviction)
+      // is not a failure; the page stays a placeholder awaiting its next turn.
+      if (!ours()) return;
       node.dataset.rendered = '';
       node.append(element('span', 'reader-pdf-error', '本页渲染失败，滚动重试。'));
     }
