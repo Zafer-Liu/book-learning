@@ -497,6 +497,8 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reader-pdf-mark.reader-highlight.highlight-blue { background: #d8e5fbaa; }
 .reader-pdf-mark.reader-highlight.highlight-green { background: #d3ece5aa; }
 .reader-pdf-mark.reader-citation { background: var(--blue-soft); opacity: .75; outline: 2px solid var(--blue); outline-offset: -1px; }
+.reader-pdf-pageflag { position: absolute; top: 6px; right: 6px; padding: 3px 9px; border-radius: 6px; border: 1px solid #e0c98a; background: #fdf6e3; color: #805923; font-size: 11px; z-index: 3; }
+.reader-pdf-pageflag:hover { background: #f8ecd0; }
 @media (max-width: 930px) {
   .desk[data-panel="evidence"] > .evidence.reader-open { display: flex; }
   .reader-notes { max-height: 45%; }

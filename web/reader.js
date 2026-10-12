@@ -676,8 +676,12 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     return pdfjsPromise;
   }
 
+  // Strip whitespace plus the invisible artifacts OCR text layers sprinkle
+  // in: soft hyphens, zero-width spaces/joiners, BOM and replacement chars.
+  const FOLD_INVISIBLE = /[\s\u00ad\u200b\u200c\u200d\ufeff\ufffd]+/g;
+
   function foldText(text) {
-    return text.replace(/\s+/g, '');
+    return text.replace(FOLD_INVISIBLE, '');
   }
 
   // Folded index over a rendered text layer: one entry per kept character,
@@ -693,8 +697,10 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       const value = node.nodeValue;
       for (let i = 0; i < value.length; i += 1) {
         const code = value.charCodeAt(i);
-        // space, tab..CR, and the common Unicode spaces PDF.js emits
-        if (code === 32 || (code >= 9 && code <= 13) || code === 0xa0 || code === 0x3000) continue;
+        // Whitespace plus the invisible artifacts OCR layers emit (soft
+        // hyphen, zero-width chars, BOM, replacement char).
+        if (code === 32 || (code >= 9 && code <= 13) || code === 0xa0 || code === 0x3000
+          || code === 0xad || (code >= 0x200b && code <= 0x200d) || code === 0xfeff || code === 0xfffd) continue;
         nodes.push(node);
         offsets.push(i);
         folded += value[i];
@@ -742,16 +748,35 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       range.setEnd(toNode, layer.offsets[at + length - 1] + 1);
       return range;
     };
+    // Whitespace folding covers most PDF.js-vs-server differences; OCR text
+    // layers can also differ in case. Retry case-insensitively, and surface
+    // a failed match instead of dropping it silently.
+    const looseNeedles = new Map();
+    const looseNeedle = (text) => {
+      const key = foldText(text);
+      if (!looseNeedles.has(key)) looseNeedles.set(key, key.toLowerCase());
+      return looseNeedles.get(key);
+    };
+    const foldedLayer = () => {
+      if (!layer.loose) layer.loose = layer.folded.toLowerCase();
+      return layer.loose;
+    };
     for (const note of reader.annotations) {
       if (note.version !== reader.version || !span(note.start, note.end)) continue;
-      const at = layer.folded.indexOf(foldText(note.quote));
-      if (at < 0) continue;
-      const range = toRange(at, foldText(note.quote).length);
+      const needle = foldText(note.quote);
+      let at = layer.folded.indexOf(needle);
+      if (at < 0) at = foldedLayer().indexOf(looseNeedle(note.quote));
+      if (at < 0) {
+        console.warn('批注未能定位到本页文字层', entry.label, note.quote.slice(0, 40));
+        continue;
+      }
+      const range = toRange(at, needle.length);
       if (range) ranges.push({ range, className: `reader-highlight highlight-${colors.has(note.color) ? note.color : 'yellow'}`, note });
     }
     if (reader.anchor && reader.anchorNeedle && span(reader.anchor.start, reader.anchor.end)) {
       const needle = foldText(reader.anchorNeedle);
-      const at = layer.folded.indexOf(needle);
+      let at = layer.folded.indexOf(needle);
+      if (at < 0) at = foldedLayer().indexOf(looseNeedle(reader.anchorNeedle));
       const range = at >= 0 ? toRange(at, needle.length) : null;
       if (range) ranges.push({ range, className: 'reader-citation' });
     }
@@ -762,6 +787,28 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     const overlap = (start, end) => entry.start <= end && entry.end >= start;
     return reader.annotations.some((note) => note.version === reader.version && overlap(note.start, note.end))
       || Boolean(reader.anchor && reader.anchorNeedle && overlap(reader.anchor.start, reader.anchor.end));
+  }
+
+  function applyPdfOverlays(reader, node, entry, textLayer, overlay) {
+    const ranges = pageHighlightRanges(reader, entry, foldLayer(textLayer));
+    overlayMarks(node, overlay, ranges);
+    // When the text layer is too noisy to place a highlight, still surface
+    // that annotations exist on this page instead of dropping them silently.
+    const overlap = (start, end) => entry.start <= end && entry.end >= start;
+    const expected = reader.annotations.filter((note) => note.version === reader.version
+      && overlap(note.start, note.end)).length;
+    node.querySelector('.reader-pdf-pageflag')?.remove();
+    if (expected && !ranges.some((item) => item.note)) {
+      const flag = element('button', 'reader-pdf-pageflag', `本页 ${expected} 条批注 · 点击查看`);
+      flag.type = 'button';
+      flag.addEventListener('click', () => {
+        if (!live(reader)) return;
+        reader.notesOpen = true;
+        reader.noteFilter = null;
+        renderNotes(reader);
+      });
+      node.append(flag);
+    }
   }
 
   // Page width: fit the pane but cap it so a maximized/fullscreen window
@@ -941,7 +988,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       // Skip the folded-highlight computation entirely on pages with nothing
       // to highlight — the common case while flipping through a book.
       if (pageHasHighlights(reader, entry)) {
-        overlayMarks(node, overlay, pageHighlightRanges(reader, entry, foldLayer(textLayer)));
+        applyPdfOverlays(reader, node, entry, textLayer, overlay);
       }
     } catch (error) {
       node.__task = null;
@@ -958,7 +1005,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       const entry = reader.pageMap.find((item) => item.pdf_page === Number(node.dataset.pdfPage));
       const textLayer = node.querySelector('.reader-pdf-text');
       const overlay = node.querySelector('.reader-pdf-overlay');
-      if (entry && textLayer && overlay) overlayMarks(node, overlay, pageHighlightRanges(reader, entry, foldLayer(textLayer)));
+      if (entry && textLayer && overlay) applyPdfOverlays(reader, node, entry, textLayer, overlay);
     }
   }
 
