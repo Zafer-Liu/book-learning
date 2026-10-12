@@ -222,12 +222,17 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     const reader = { ...old, epoch: getEpoch(), frame: null, positionTimer: null, syncTimer: null,
       loading: null, navigating: false, anchorNeedle: null,
       notesLoading: false, selection: null, highlightsPending: false };
+    // Must read the old reader's DOM before mount() replaces it.
+    const resumeAt = old.sourceFormat === 'pdf' && old.pageMap?.length ? (pdfTopPage(old)?.start ?? 0) : 0;
     current = reader;
     mount(reader);
     if (reader.sourceFormat === 'pdf') {
       // The PDF view owns canvases that cannot survive a re-mount; a fresh
       // navigate() rebuilds page placeholders from the cached document.
-      navigate(reader, old.target || {});
+      // Resume at the CURRENT reading position — replaying old.target would
+      // snap back to wherever the last navigation started (usually page 1),
+      // and the next scroll save would overwrite the real progress.
+      navigate(reader, old.navigating ? (old.target || {}) : { at: resumeAt, version: reader.version });
     } else {
       reader.tocSelect.replaceChildren(...reader.toc.map((item) => new Option(item.title, item.start)));
       reader.stream.replaceChildren(...reader.blocks.map((block) => blockNode(reader, block)));

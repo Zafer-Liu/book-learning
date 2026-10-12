@@ -555,7 +555,7 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reading-focused .composer textarea { resize: none; min-height: 60px; max-height: 84px; padding: 10px 12px 4px; }
 .reading-focused .composer-bottom { padding: 4px 8px 8px 12px; }
 .reading-focused .composer-note { margin-top: 6px; }
-.reader-chat-launcher { position: absolute; z-index: 4; right: 132px; top: 5px; min-height: 44px; padding: 8px 14px; border: 1px solid var(--blue); border-radius: 7px; background: var(--blue); color: var(--white); font-size: 12px; }
+.reader-chat-launcher { min-height: 40px; padding: 8px 14px; border: 1px solid var(--blue); border-radius: 7px; background: var(--blue); color: var(--white); font-size: 12px; white-space: nowrap; }
 .reader-chat-launcher:hover { background: #234cad; }
 @media (min-width: 800px) {
   .reading-focused .reader-tools { grid-template-columns: minmax(0, 1fr) minmax(240px, 420px); column-gap: 28px; }
@@ -570,7 +570,6 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
   .desk.reading-focused > .study { right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); height: min(560px, 68%); max-height: calc(100% - 84px); }
   .reading-focused .study-controls { padding: 8px 12px; }
   .reading-focused .composer textarea { font-size: 16px; }
-  .reader-chat-launcher { right: 104px; padding: 8px 10px; }
 }
 @media (max-height: 520px) {
   .desk.reading-focused > .study { height: calc(100% - 84px); bottom: 12px; }
