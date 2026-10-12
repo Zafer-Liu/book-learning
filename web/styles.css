@@ -515,7 +515,7 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 .reading-focused .evidence > .panel-heading { flex-shrink: 0; min-height: 54px; padding: 8px 24px; background: var(--paper); }
 .reading-focused .evidence > .panel-heading .eyebrow { display: none; }
 .reading-focused .evidence > .panel-heading h2 { font-size: 16px; margin-top: 2px; }
-.reading-focused #reader-focus { min-height: 40px; }
+.reading-focused #reader-focus, .reading-focused #reader-native { min-height: 40px; }
 .reading-focused .reader-tools { padding: 10px 24px; flex-shrink: 0; }
 .reading-focused .reader-hint { display: none; }
 .reading-focused .reader-scroll { padding: 28px max(24px, calc((100% - 760px) / 2)) 64px; background: #fffefc; }
@@ -597,24 +597,31 @@ mark.reader-citation { background: var(--blue-soft); color: inherit; border-radi
 }
 
 /* Private annotation dialog. */
-.annotation-dialog { max-width: 520px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 14px; padding: 27px; box-shadow: 0 30px 100px #172b4d25; color: var(--ink); }
+.annotation-dialog { max-width: 520px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: 14px; padding: 24px; box-shadow: 0 30px 100px #172b4d25; color: var(--ink); }
 .annotation-dialog::backdrop { background: #172b4d60; backdrop-filter: blur(3px); }
-.annotation-dialog form { display: flex; flex-direction: column; gap: 16px; }
-.annotation-dialog .dialog-heading { margin-bottom: 2px; }
-.annotation-dialog h2 { font-size: 20px; font-weight: 600; }
+.annotation-dialog form { display: flex; flex-direction: column; gap: 14px; }
+.annotation-dialog .dialog-heading { margin-bottom: 0; align-items: flex-start; }
+.annotation-dialog .dialog-heading .square-button { flex-shrink: 0; }
+.annotation-dialog h2 { font-size: 19px; font-weight: 600; }
 .annotation-dialog .muted { font-size: 11px; line-height: 1.8; }
-.annotation-quote { margin: 0; padding: 12px 15px; border-left: 3px solid var(--green); background: var(--paper); border-radius: 0 8px 8px 0; font: 13px/2 var(--serif); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 190px; overflow-y: auto; }
-.annotation-dialog label { font-size: 13px; }
-.annotation-dialog textarea { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; font: inherit; font-size: 13px; line-height: 1.8; resize: vertical; }
-.annotation-dialog textarea:focus { outline: 0; border-color: #7796d7; }
-.annotation-colors { border: 0; padding: 0; margin: 0; display: flex; align-items: center; gap: 14px; font-size: 12px; }
-.annotation-colors legend { float: left; width: 100%; font-size: 12px; margin-bottom: 7px; }
-.annotation-colors label { display: flex; align-items: center; gap: 6px; margin: 0; }
+#annotation-version { margin: -6px 0 0; }
+.annotation-quote { margin: 0; padding: 11px 14px; border-left: 3px solid var(--green); background: var(--paper); border-radius: 0 8px 8px 0; font: 13px/1.9 var(--serif); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 170px; overflow-y: auto; }
+.annotation-dialog label { font-size: 12px; }
+.annotation-dialog textarea { width: 100%; min-height: 96px; border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; font: inherit; font-size: 13px; line-height: 1.8; resize: vertical; margin-top: 6px; }
+.annotation-dialog textarea:focus { outline: 0; border-color: #7796d7; box-shadow: 0 0 0 3px #315cc71a; }
+.annotation-colors { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 12px; }
+.annotation-colors legend { float: left; width: 100%; font-size: 12px; margin-bottom: 8px; }
+.annotation-colors label { display: flex; align-items: center; gap: 6px; margin: 0; padding: 5px 10px 5px 6px; border: 1px solid transparent; border-radius: 7px; cursor: pointer; }
+.annotation-colors label:hover { background: var(--paper); }
+.annotation-colors label:has(input:checked) { border-color: #abbff1; background: var(--blue-soft); }
 .annotation-colors input { width: auto; margin: 0; accent-color: var(--blue); }
 .annotation-colors label::before { content: ""; width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--line); }
 .annotation-colors label:has(input[value="yellow"])::before { background: #f6e7bd; }
 .annotation-colors label:has(input[value="blue"])::before { background: #d8e5fb; }
 .annotation-colors label:has(input[value="green"])::before { background: #d3ece5; }
-.annotation-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.annotation-private { border-top: 1px solid var(--line); padding-top: 12px; }
+.annotation-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 2px; }
+.annotation-actions .primary { padding: 11px 22px; }
+#annotation-delete.armed { background: var(--danger); color: var(--white); border-radius: 7px; padding: 8px 14px; font-weight: 600; }
+#annotation-delete.armed::after { content: "（此操作无法恢复）"; font-weight: 400; font-size: 10px; }
+.annotation-private { border-top: 1px solid var(--line); padding-top: 11px; margin-bottom: -4px; }
 .annotation-dialog .form-error:empty { display: none; }

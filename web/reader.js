@@ -154,16 +154,16 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     desk.classList.toggle('reading-focused', expanded);
     $('#workspace').classList.toggle('reader-fullscreen', expanded);
     $('#reader-focus').setAttribute('aria-pressed', String(expanded));
-    $('#reader-focus').textContent = expanded ? '退出全屏' : '展开阅读';
+    // 展开阅读 is the in-page expanded layout only; the browser/system
+    // fullscreen is a separate, explicit toggle (#reader-native).
+    $('#reader-focus').textContent = expanded ? '收起阅读' : '展开阅读';
     // Reading starts with an unobstructed page; the tutor opens on demand.
     setChatMinimized(expanded);
     if (expanded) {
       panel('evidence');
       resizeFocus();
-      requestNativeFullscreen();
       current.scroll.focus({ preventScroll: true });
     } else {
-      const exiting = exitNativeFullscreen();
       chatPosition = null;
       chat.style.removeProperty('--chat-x');
       chat.style.removeProperty('--chat-y');
@@ -174,12 +174,11 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
         const target = previousFocus;
         const restoreFocus = () => {
           if (focused || !reader || !live(reader)) return;
-          const visibleTarget = [target, $('#reader-focus'), $('#question')]
+          const visibleTarget = [target, $('#reader-focus'), $('#reader-native'), $('#question')]
             .find((node) => node?.isConnected && !node.disabled && node.getClientRects().length);
           visibleTarget?.focus({ preventScroll: true });
         };
-        if (exiting) exiting.then(restoreFocus);
-        else restoreFocus();
+        restoreFocus();
       }
       previousFocus = null;
     }
@@ -207,6 +206,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     $('#annotation-error').textContent = '';
     $('.evidence').classList.remove('reader-open');
     $('#reader-focus').hidden = true;
+    $('#reader-native').hidden = true;
     setFocus(false, { restore: false });
   }
 
@@ -261,6 +261,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   function mount(reader) {
     $('.evidence').classList.add('reader-open');
     $('#reader-focus').hidden = false;
+    $('#reader-native').hidden = false;
     const shell = element('div', 'reader-shell');
     reader.shell = shell;
     const tools = element('div', 'reader-tools');
@@ -1372,6 +1373,7 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     $('#annotation-version').textContent = !reader.version ? '尚未读取正文；已有批注仍可编辑或删除。'
       : annotation && annotation.version !== reader.version ? '旧版本批注：保留原选文，不会自动移动到当前正文。' : '当前正文 · 私人批注';
     $('#annotation-delete').hidden = !annotation;
+    disarmDelete();
     $('#annotation-error').textContent = '';
     setEditorBusy(false);
     $('#annotation-dialog').showModal();
@@ -1383,11 +1385,25 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     document.querySelectorAll('input[name="annotation-color"]').forEach((node) => { node.disabled = busy; });
   }
 
+  // Two-step in-dialog delete confirmation: the first click arms the button
+  // (red, "确认删除"), the second within the window deletes. No browser
+  // confirm() dialogs.
+  let deleteArmed = false;
+  let deleteArmTimer = null;
+
+  function disarmDelete() {
+    deleteArmed = false;
+    clearTimeout(deleteArmTimer);
+    const button = $('#annotation-delete');
+    button.classList.remove('armed');
+    button.textContent = '删除批注';
+  }
+
   async function saveAnnotation(remove = false) {
     const context = editor;
     if (!context || context.busy || !live(context.reader)) return;
     const { reader, annotation, selection } = context;
-    if (remove && (!annotation || !confirm('删除这条批注及其高亮？此操作无法恢复。'))) return;
+    if (remove && !annotation) return;
     context.busy = true;
     setEditorBusy(true);
     $('#annotation-error').textContent = '';
@@ -1500,15 +1516,29 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   document.addEventListener('fullscreenchange', () => {
     if (document.fullscreenElement === document.documentElement) {
       if (nativeRequest) nativeOwned = true;
-      if (!focused) exitNativeFullscreen();
+      // Entering system fullscreen always implies the expanded layout.
+      if (!focused && current && live(current)) setFocus(true);
     } else if (nativeOwned) {
       nativeOwned = false;
-      if (focused && !nativeExiting) setFocus(false);
+      // Leaving system fullscreen returns to the expanded in-page layout,
+      // not all the way back to the study panel.
     }
+    $('#reader-native').textContent = document.fullscreenElement ? '退出全屏' : '全屏';
+    $('#reader-native').setAttribute('aria-pressed', String(Boolean(document.fullscreenElement)));
     resizeFocus();
+  });
+  $('#reader-native').addEventListener('click', () => {
+    if (document.fullscreenElement) exitNativeFullscreen();
+    else {
+      if (!focused && current && live(current)) setFocus(true);
+      requestNativeFullscreen();
+    }
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !focused || event.defaultPrevented || document.querySelector('dialog[open]')) return;
+    // In system fullscreen the browser's own Esc exit is the expected
+    // response; the expanded layout stays.
+    if (document.fullscreenElement) return;
     event.preventDefault();
     setFocus(false);
   });
@@ -1520,11 +1550,24 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   window.visualViewport?.addEventListener('resize', resizeFocus);
   window.visualViewport?.addEventListener('scroll', resizeFocus);
   $('#annotation-form').addEventListener('submit', (event) => { event.preventDefault(); saveAnnotation(); });
-  $('#annotation-delete').addEventListener('click', () => saveAnnotation(true));
+  $('#annotation-delete').addEventListener('click', () => {
+    if (deleteArmed) {
+      disarmDelete();
+      saveAnnotation(true);
+      return;
+    }
+    deleteArmed = true;
+    const button = $('#annotation-delete');
+    button.classList.add('armed');
+    button.textContent = '确认删除';
+    clearTimeout(deleteArmTimer);
+    deleteArmTimer = setTimeout(disarmDelete, 2600);
+  });
   $('#annotation-close').addEventListener('click', () => $('#annotation-dialog').close());
   $('#annotation-dialog').addEventListener('cancel', (event) => { if (editor?.busy) event.preventDefault(); });
   $('#annotation-dialog').addEventListener('close', () => {
     editor = null;
+    disarmDelete();
     captureSelection();
     if (current?.highlightsPending && live(current)) {
       current.highlightsPending = false;
