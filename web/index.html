@@ -59,7 +59,6 @@
           <button id="library-search-clear" class="library-search-clear" type="button" aria-label="清空书架搜索" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"></path></svg></button>
         </div>
         <span id="library-search-status" class="sr-only" role="status" aria-live="polite"></span>
-        <button id="all-review-open" class="all-review-open" type="button">今日复习 · 暂无到期</button>
         <div id="group-bar" class="group-bar" hidden><button id="create-group-open" class="outline-button small">新建文献组</button></div>
         <p class="library-hint">切一本书，开启一段独立学习。</p>
         <div id="book-list" class="book-list"></div>
@@ -72,7 +71,7 @@
         </div>
         <div class="study-heading">
           <div><h1 id="current-title">从一本教材开始</h1><p id="current-meta">上传已完成 OCR 的 Markdown，或选择书架中的教材。</p></div>
-          <div id="book-actions" class="book-actions" hidden><button id="read-book" class="read-book-button" type="button"><span id="read-book-label">阅读全文</span><span class="read-book-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z"></path></svg></span></button><button id="review-open" class="outline-button" hidden>待复习</button><button id="book-notes" class="text-button">我的批注</button><button id="export-cards" class="text-button" title="把本书全部自测题导出为 Anki 兼容的 CSV 学习卡片">导出卡片</button><button id="reindex" class="text-button">重新索引</button></div>
+          <div id="book-actions" class="book-actions" hidden><button id="read-book" class="read-book-button" type="button"><span id="read-book-label">阅读全文</span><span class="read-book-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.172 11l-5.364-5.364 1.414-1.414L20 12l-7.778 7.778-1.414-1.414L16.172 13H4v-2z"></path></svg></span></button><button id="review-mode" class="text-button" type="button">复习模式</button><button id="book-notes" class="text-button">我的批注</button><button id="reindex" class="text-button">重新索引</button></div>
         </div>
         <div id="config-warning" class="notice warning" hidden></div>
         <div id="book-error" class="notice warning" hidden></div>
@@ -104,6 +103,14 @@
     <div class="dialog-heading"><h2 id="review-title">待复习</h2><button id="review-close" type="button" class="square-button" aria-label="关闭复习">×</button></div>
     <p class="muted">先尝试回忆，再展开参考答案。自评会安排下一次复习。</p>
     <div id="review-list" class="review-list"></div>
+  </dialog>
+  <dialog id="review-mode-dialog" class="review-dialog" aria-labelledby="review-mode-title">
+    <div class="dialog-heading"><h2 id="review-mode-title">复习模式</h2><button id="review-mode-close" type="button" class="square-button" aria-label="关闭复习模式">×</button></div>
+    <p class="muted">按记忆节奏回顾自测题，或把题目带走离线复习。</p>
+    <div class="review-mode-list">
+      <button id="review-mode-due" type="button"><strong>今日复习</strong><span>全书架到期自测题，先回忆再核对答案</span></button>
+      <button id="review-mode-export" type="button"><strong>导出 Anki 卡片</strong><span>本书全部自测题导出为 CSV 学习卡片</span></button>
+    </div>
   </dialog>
 
   <dialog id="upload-dialog" class="upload-dialog">

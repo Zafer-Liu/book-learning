@@ -108,8 +108,6 @@ h1, h2, h3, p { margin: 0; }
 .library-search-clear { position: absolute; right: 7px; top: 7px; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: var(--muted); }
 .library-search-clear:hover { color: var(--ink); background: var(--paper); }
 .library-search-clear svg { width: 15px; height: 15px; }
-.all-review-open { width: 100%; min-height: 44px; text-align: left; padding: 9px 12px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--white); font-size: 12px; }
-.all-review-open:hover, .all-review-open.has-due { color: var(--green); border-color: #a8c9bc; background: #f2f8f5; }
 .library-hint { color: var(--muted); font-size: 11px; line-height: 1.8; margin-bottom: 13px; }
 .book-list { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -5px; padding: 0 5px; }
 .book-item { width: 100%; display: flex; align-items: start; gap: 12px; text-align: left; padding: 13px 10px; border-radius: 8px; margin-bottom: 6px; border: 1px solid transparent; }
@@ -156,9 +154,9 @@ h1, h2, h3, p { margin: 0; }
 .study-heading > div:first-child { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .study-heading h1 { font-size: 18px; font-weight: 600; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
 .study-heading p { font-size: 11px; color: var(--muted); line-height: 1.8; }
-.book-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; max-width: 190px; padding-top: 4px; flex-shrink: 0; }
-.book-actions .text-button { font-size: 10px; }
-.book-actions #review-open { border-color: #a8c9bc; color: var(--green); }
+.book-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 10px; max-width: 480px; padding-top: 4px; flex-shrink: 0; }
+.book-actions .text-button { font-size: 11px; }
+.book-actions #review-mode.has-due { color: var(--green); font-weight: 600; }
 /* Adapted from Uiverse arrow button by @d4niz; see docs/UI_COMPONENT_CREDITS.md. */
 .read-book-button { position: relative; display: inline-flex; align-items: center; min-height: 38px; max-width: 100%; padding: 5px 43px 5px 12px; overflow: hidden; border-radius: 10px; background: var(--blue); color: var(--white); font-size: 11px; font-weight: 600; white-space: nowrap; box-shadow: inset 0 -8px 15px -12px #152f77; transition: transform .16s ease, box-shadow .16s ease, background .16s ease; }
 .read-book-button:hover { background: #234cad; transform: translateY(-1px); box-shadow: 0 5px 13px #172b4d1c; }
@@ -236,6 +234,12 @@ h1, h2, h3, p { margin: 0; }
 .quiz-save-status.error { color: var(--danger); }
 .quiz-retry { font-size: 11px; color: var(--blue); padding: 3px 0; }
 .review-dialog { width: min(680px, calc(100% - 24px)); max-height: min(85dvh, 820px); border: 1px solid var(--line); border-radius: 14px; padding: 24px; box-shadow: 0 22px 70px #172b4d28; color: var(--ink); }
+#review-mode-dialog { width: min(420px, calc(100% - 24px)); }
+.review-mode-list { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.review-mode-list button { display: flex; flex-direction: column; gap: 5px; text-align: left; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--white); }
+.review-mode-list button:hover { border-color: #abbff1; background: var(--blue-soft); }
+.review-mode-list strong { font-size: 13px; }
+.review-mode-list span { font-size: 11px; color: var(--muted); line-height: 1.7; }
 .review-dialog::backdrop { background: #172b4d60; }
 .review-dialog .dialog-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .review-dialog .dialog-heading .square-button { width: 44px; height: 44px; }

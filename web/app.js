@@ -646,8 +646,7 @@ function renderBook() {
   $('#read-book').hidden = !book || book.status !== 'ready' || isGroup;
   updateReadButton();
   $('#book-notes').hidden = !book || book.status !== 'ready' || isGroup;
-  $('#export-cards').hidden = !book || book.status !== 'ready' || isGroup;
-  $('#review-open').hidden = !book || book.status !== 'ready';
+  $('#review-mode').hidden = !book || book.status !== 'ready';
   updateReviewButton();
   if (book?.status === 'ready' && !isGroup && state.bookStats) {
     const s = state.bookStats;
@@ -672,11 +671,9 @@ function updateReadButton() {
 }
 
 function updateReviewButton() {
-  const count = state.bookStats?.review_due || 0;
-  $('#review-open').textContent = count ? `待复习 ${count}` : '待复习';
   const total = state.reviewDueTotal || 0;
-  $('#all-review-open').textContent = total ? `今日复习 · ${total} 题` : '今日复习 · 暂无到期';
-  $('#all-review-open').classList.toggle('has-due', total > 0);
+  $('#review-mode').textContent = total ? `复习模式 · ${total}` : '复习模式';
+  $('#review-mode').classList.toggle('has-due', total > 0);
 }
 
 function setReviewDue(bookId, count, total) {
@@ -1533,8 +1530,25 @@ action($('#reindex'), 'click', async () => {
   toast('已重新加入索引队列。');
 });
 action($('#read-book'), 'click', () => state.book && readerUI.open(state.book.id, { expanded: true }));
-action($('#review-open'), 'click', () => openReview(state.book?.id));
-action($('#all-review-open'), 'click', () => openReview());
+// 复习模式 gathers the review entries: due questions from the whole shelf
+// plus the Anki CSV export that used to be a separate top-level button.
+action($('#review-mode'), 'click', () => {
+  const total = state.reviewDueTotal || 0;
+  $('#review-mode-due span').textContent = total
+    ? `全书架 ${total} 题到期，先回忆再核对答案`
+    : '全书架暂无到期自测题，先回忆再核对答案';
+  $('#review-mode-export').hidden = state.book?.category === 'group';
+  $('#review-mode-dialog').showModal();
+});
+$('#review-mode-close').addEventListener('click', () => $('#review-mode-dialog').close());
+$('#review-mode-due').addEventListener('click', () => {
+  $('#review-mode-dialog').close();
+  openReview();
+});
+$('#review-mode-export').addEventListener('click', () => {
+  $('#review-mode-dialog').close();
+  exportCards();
+});
 $('#review-close').addEventListener('click', () => $('#review-dialog').close());
 action($('#book-notes'), 'click', () => state.book && readerUI.open(state.book.id, { notes: true }));
 action($('#new-conversation'), 'click', () => selectConversation(''));
@@ -1786,7 +1800,7 @@ $('#selection-chip-remove').addEventListener('click', () => {
   state.pendingSelection = null;
   renderSelectionChip();
 });
-action($('#export-cards'), 'click', async () => {
+async function exportCards() {
   if (!state.book) return;
   // Probe first so an empty deck shows a toast instead of a raw JSON page.
   const response = await fetch(`/api/books/${state.book.id}/export/cards.csv`);
@@ -1802,7 +1816,7 @@ action($('#export-cards'), 'click', async () => {
   link.download = `cards-${state.book.id.slice(0, 8)}.csv`;
   link.click();
   URL.revokeObjectURL(url);
-});
+}
 
 // Guest demo on the login page: builtin books, IP-throttled, nothing saved.
 const demo = { books: [], busy: false };
