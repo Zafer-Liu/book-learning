@@ -323,7 +323,13 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     reader.scroll.append(reader.before, reader.stream, reader.after);
     // Track pointer state on the whole document: the drag may leave the
     // scroll box, and touch selection also fires pointerup when lifted.
-    const onPointerDown = () => { pointerDown = true; hidePopover(); };
+    // Never hide on presses INSIDE the popover: destroying it on pointerdown
+    // detaches the buttons before their click events fire, making
+    // 高亮批注 / 问 AI dead on click.
+    const onPointerDown = (event) => {
+      pointerDown = true;
+      if (!popover?.contains(event.target)) hidePopover();
+    };
     const onPointerUp = () => {
       pointerDown = false;
       // Arm the toolbar; captureSelection (which follows on selectionchange)
@@ -1258,8 +1264,16 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function showPopover(reader, selection) {
+    // Idempotent for the same selection: the global pointerup re-invokes this
+    // on every click, and rebuilding the popover mid-click redirects the
+    // click to the common ancestor (dead buttons). selectionchange also
+    // re-creates the selection OBJECT for identical text, so compare by
+    // content, not identity.
+    const signature = `${selection.pdf_page ?? ''}:${selection.start ?? ''}:${selection.quote}`;
+    if (popover && popover.__signature === signature) return;
     hidePopover();
     popover = element('div', 'reader-popover');
+    popover.__signature = signature;
     popover.setAttribute('role', 'toolbar');
     popover.setAttribute('aria-label', '选文操作');
     const highlight = button('高亮批注', () => {
@@ -1272,6 +1286,13 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       onAsk?.({ quote: selection.quote, section: passageSection(reader) });
     });
     ask.type = 'button';
+    // A press on a popover button must not let the browser collapse the text
+    // selection — that fires selectionchange → hidePopover before the click
+    // lands. Cancel the default on MOUSEDOWN (pointerdown's preventDefault
+    // would also suppress the click event itself).
+    for (const node of [highlight, ask]) {
+      node.addEventListener('mousedown', (event) => event.preventDefault());
+    }
     popover.append(highlight, ask);
     document.body.append(popover);
     // Place it above the selection end, flipping below when near the top.
