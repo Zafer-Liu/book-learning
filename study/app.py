@@ -260,7 +260,11 @@ def create_app(test_config=None):
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            # 'wasm-unsafe-eval' is the narrow WebAssembly exemption (NOT the
+            # blanket unsafe-eval): PDF.js needs it to decode JPX/JBIG2 page
+            # images, which otherwise render as blank canvases.
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
             "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         )
