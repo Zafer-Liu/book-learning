@@ -674,19 +674,25 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
 
   // Folded index over a rendered text layer: one entry per kept character,
   // pointing at its DOM text node + offset so a folded match becomes a Range.
+  // Hot path: parallel plain arrays + charCode whitespace test, no per-char
+  // objects or regex calls — dense pages fold in a fraction of the time.
   function foldLayer(container) {
     let folded = '';
-    const map = [];
+    const nodes = [];
+    const offsets = [];
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const value = node.nodeValue;
       for (let i = 0; i < value.length; i += 1) {
-        if (/\s/.test(value[i])) continue;
-        map.push({ node, offset: i });
+        const code = value.charCodeAt(i);
+        // space, tab..CR, and the common Unicode spaces PDF.js emits
+        if (code === 32 || (code >= 9 && code <= 13) || code === 0xa0 || code === 0x3000) continue;
+        nodes.push(node);
+        offsets.push(i);
         folded += value[i];
       }
     }
-    return { folded, map };
+    return { folded, nodes, offsets };
   }
 
   function overlayMarks(container, overlay, ranges) {
@@ -719,33 +725,35 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   function pageHighlightRanges(reader, entry, layer) {
     const ranges = [];
     const span = (start, end) => entry.start <= end && entry.end >= start;
+    const toRange = (at, length) => {
+      const fromNode = layer.nodes[at];
+      const toNode = layer.nodes[at + length - 1];
+      if (!fromNode || !toNode || !fromNode.isConnected || !toNode.isConnected) return null;
+      const range = document.createRange();
+      range.setStart(fromNode, layer.offsets[at]);
+      range.setEnd(toNode, layer.offsets[at + length - 1] + 1);
+      return range;
+    };
     for (const note of reader.annotations) {
       if (note.version !== reader.version || !span(note.start, note.end)) continue;
-      const { folded, map } = layer;
-      const needle = foldText(note.quote);
-      const at = folded.indexOf(needle);
-      if (at < 0 || at + needle.length > map.length) continue;
-      const from = map[at];
-      const to = map[at + needle.length - 1];
-      const range = document.createRange();
-      range.setStart(from.node, from.offset);
-      range.setEnd(to.node, to.offset + 1);
-      ranges.push({ range, className: `reader-highlight highlight-${colors.has(note.color) ? note.color : 'yellow'}`, note });
+      const at = layer.folded.indexOf(foldText(note.quote));
+      if (at < 0) continue;
+      const range = toRange(at, foldText(note.quote).length);
+      if (range) ranges.push({ range, className: `reader-highlight highlight-${colors.has(note.color) ? note.color : 'yellow'}`, note });
     }
     if (reader.anchor && reader.anchorNeedle && span(reader.anchor.start, reader.anchor.end)) {
-      const { folded, map } = layer;
       const needle = foldText(reader.anchorNeedle);
-      const at = folded.indexOf(needle);
-      if (at >= 0 && at + needle.length <= map.length) {
-        const from = map[at];
-        const to = map[at + needle.length - 1];
-        const range = document.createRange();
-        range.setStart(from.node, from.offset);
-        range.setEnd(to.node, to.offset + 1);
-        ranges.push({ range, className: 'reader-citation' });
-      }
+      const at = layer.folded.indexOf(needle);
+      const range = at >= 0 ? toRange(at, needle.length) : null;
+      if (range) ranges.push({ range, className: 'reader-citation' });
     }
     return ranges;
+  }
+
+  function pageHasHighlights(reader, entry) {
+    const overlap = (start, end) => entry.start <= end && entry.end >= start;
+    return reader.annotations.some((note) => note.version === reader.version && overlap(note.start, note.end))
+      || Boolean(reader.anchor && reader.anchorNeedle && overlap(reader.anchor.start, reader.anchor.end));
   }
 
   // Page width: fit the pane but cap it so a maximized/fullscreen window
@@ -761,13 +769,18 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   function relayoutPdf(reader) {
     const pdf = reader.pdf;
     if (!pdf?.doc || !pdf.base) return;
+    // Page heights change with the width; keep the reader on the same page.
+    const anchor = pdfTopPage(reader);
     const width = pdfPageWidth(reader);
     pdf.scale = width / pdf.base.width;
     for (const node of reader.scroll.querySelectorAll('.reader-pdf-page')) {
       node.style.width = `${width}px`;
-      // Rendered pages keep their aspect until the next render catches up;
-      // placeholders shrink immediately via aspect-ratio.
-      if (node.dataset.rendered === 'done') {
+      if (node.dataset.rendered === 'done' || node.dataset.rendered === 'pending') {
+        // A render still in flight shares the canvas with any new render and
+        // PDF.js rejects that ("multiple render() operations"), leaving a
+        // blank canvas behind — cancel it before resetting the page.
+        node.__task?.cancel?.();
+        node.__task = null;
         node.dataset.rendered = '';
         node.style.aspectRatio = `${pdf.base.width} / ${pdf.base.height}`;
         node.style.height = '';
@@ -778,16 +791,19 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
         pdf.observer?.observe(node);
       }
     }
+    if (anchor) {
+      const node = reader.scroll.querySelector(`[data-pdf-page="${anchor.pdf_page}"]`);
+      if (node) setScrollTop(reader, reader.scroll.scrollTop + node.getBoundingClientRect().top
+        - reader.scroll.getBoundingClientRect().top - 16);
+    }
   }
 
   function scheduleRelayout(reader) {
     clearTimeout(reader.pdf?.relayoutTimer);
     reader.pdf.relayoutTimer = setTimeout(() => {
-      if (!live(reader)) return;
-      // Entering/leaving focus mode briefly reports transitional pane widths;
-      // applying one would shrink the pages to a sliver, so ignore them.
-      if (reader.scroll.clientWidth < 320) return;
-      relayoutPdf(reader);
+      // Widths near zero come from display:none transitions, not real panes;
+      // everything else (the normal ~300px evidence pane included) is honest.
+      if (live(reader) && reader.scroll.clientWidth >= 120) relayoutPdf(reader);
     }, 250);
   }
 
@@ -822,9 +838,20 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     if (pdf.observer) pdf.observer.disconnect();
     pdf.observer = new IntersectionObserver((records) => {
       for (const record of records) {
-        if (record.isIntersecting) renderPdfPage(reader, record.target);
+        if (record.isIntersecting) {
+          renderPdfPage(reader, record.target);
+        } else if (record.target.dataset.rendered === 'done') {
+          // Evict far-away pages back to placeholders: rendered canvases are
+          // megabytes each, and a long book otherwise accumulates them all.
+          record.target.__task?.cancel?.();
+          record.target.__task = null;
+          record.target.dataset.rendered = '';
+          record.target.style.aspectRatio = `${pdf.base.width} / ${pdf.base.height}`;
+          record.target.style.height = '';
+          record.target.replaceChildren(element('span', 'reader-pdf-loading'));
+        }
       }
-    }, { root: reader.scroll, rootMargin: '800px 0px' });
+    }, { root: reader.scroll, rootMargin: '600px 0px' });
     // Fullscreen enter/exit and pane resizes re-fit the pages.
     pdf.resizeObserver?.disconnect();
     pdf.resizeObserver = new ResizeObserver(() => scheduleRelayout(reader));
@@ -866,15 +893,20 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
     node.dataset.rendered = 'pending';
     try {
       const page = await pdf.doc.getPage(entry.pdf_page + 1);
-      if (!node.isConnected) return;
+      if (!node.isConnected || node.dataset.rendered === '') return;
       const viewport = page.getViewport({ scale: pdf.scale });
       const canvas = element('canvas', 'reader-pdf-canvas');
-      const ratio = window.devicePixelRatio || 1;
+      // Render sharp, but cap the backing store: full devicePixelRatio on
+      // 4K monitors quadruples raster work for little visible gain, and huge
+      // canvases are the main source of scroll jank on long books.
+      let ratio = Math.min(window.devicePixelRatio || 1, 1.5);
+      if (viewport.width * viewport.height * ratio * ratio > 4_200_000) ratio = 1;
       canvas.width = Math.floor(viewport.width * ratio);
       canvas.height = Math.floor(viewport.height * ratio);
       canvas.style.width = `${viewport.width}px`;
       canvas.style.height = `${viewport.height}px`;
-      const render = page.render({ canvasContext: canvas.getContext('2d'), viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+      const render = page.render({ canvasContext: canvas.getContext('2d', { alpha: false }), viewport, transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+      node.__task = render;
       const textLayer = element('div', 'reader-pdf-text');
       const overlay = element('div', 'reader-pdf-overlay');
       node.replaceChildren(canvas, textLayer, overlay);
@@ -887,8 +919,16 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
       });
       await layer.render();
       node.dataset.rendered = 'done';
-      overlayMarks(node, overlay, pageHighlightRanges(reader, entry, foldLayer(textLayer)));
+      node.__task = null;
+      // Skip the folded-highlight computation entirely on pages with nothing
+      // to highlight — the common case while flipping through a book.
+      if (pageHasHighlights(reader, entry)) {
+        overlayMarks(node, overlay, pageHighlightRanges(reader, entry, foldLayer(textLayer)));
+      }
     } catch (error) {
+      node.__task = null;
+      // A cancelled render (page reset by a relayout) is not a failure.
+      if (node.dataset.rendered === '') return;
       node.dataset.rendered = '';
       node.append(element('span', 'reader-pdf-error', '本页渲染失败，滚动重试。'));
     }
@@ -904,10 +944,19 @@ export function createReader({ api, element, findBook, getEpoch, getAuth, panel,
   }
 
   function pdfTopPage(reader) {
-    const top = reader.scroll.getBoundingClientRect().top;
-    const node = [...reader.scroll.querySelectorAll('.reader-pdf-page')]
-      .find((item) => item.getBoundingClientRect().bottom > top + 24);
-    const pdfPage = Number(node?.dataset.pdfPage);
+    // Runs on every scroll frame: pages are in document order, so a binary
+    // search needs ~log2(N) rect reads instead of touching all 300+ nodes.
+    const nodes = reader.scroll.querySelectorAll('.reader-pdf-page');
+    if (!nodes.length) return reader.pageMap[0];
+    const top = reader.scroll.getBoundingClientRect().top + 24;
+    let low = 0;
+    let high = nodes.length - 1;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (nodes[middle].getBoundingClientRect().bottom > top) high = middle;
+      else low = middle + 1;
+    }
+    const pdfPage = Number(nodes[low].dataset.pdfPage);
     return reader.pageMap.find((item) => item.pdf_page === pdfPage) || reader.pageMap[0];
   }
 
