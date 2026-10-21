@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from flask import abort, g, jsonify, request
 
 from .database import public_reading_progress
-from .documents import MAX_CHARS, MAX_CHUNKS, parse_document, split_sections
+from .documents import MAX_CHARS, MAX_CHUNKS, _SPACED_CJK, parse_document, split_sections
 
 BLOCK_CHARS = 2400
 CACHE_ENTRIES = 3
@@ -23,7 +23,12 @@ COLORS = {"yellow", "blue", "green"}
 
 class Snapshot:
     def __init__(self, sections):
-        self.text = "\n\n".join(section["text"].strip() for section in sections)
+        # Canonical text must match what split_sections indexes: CJK-adjacent
+        # spaces are stripped there (documents._SPACED_CJK), so they are
+        # stripped here too — otherwise chunk offsets point into a different
+        # string than self.text and anchor()'s equality check always fails.
+        texts = [_SPACED_CJK.sub("", section["text"].strip()) for section in sections]
+        self.text = "\n\n".join(texts)
         if not self.text or len(self.text) > MAX_CHARS + 2 * MAX_CHUNKS or len(sections) > MAX_CHUNKS:
             raise ValueError("Invalid canonical text length")
         self.version = hashlib.sha256(self.text.encode("utf-8")).hexdigest()
@@ -35,7 +40,7 @@ class Snapshot:
         self.source_format = "pdf" if any("pdf_page" in s for s in sections) else "text"
         position = 0
         for index, section in enumerate(sections):
-            text = section["text"].strip()
+            text = texts[index]
             section_end = position + len(text) + (2 if index + 1 < len(sections) else 0)
             self.toc.append({"title": section["section"], "start": self.to_utf16(position),
                              "index": len(self.blocks)})
