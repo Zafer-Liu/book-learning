@@ -125,6 +125,7 @@ flowchart LR
 - **阅读位置记忆**:阅读进度按账户同步,书架显示续读位置;本机也保留一份备用记录,重开自动回到最近位置。书详情展示对话/提问/批注统计。
 - **长对话压缩 + 上下文计量**:如「图 3」。
 - **可选联网补充**:配置 `STUDY_SEARCH_API_KEY`(默认走智谱 `web-search-pro` 工具接口,普通智谱 Key 即可;亦可改走远程 MCP)后出现开关,默认关闭;如「图 2」,仅模型提炼的检索词出网。
+- **可选图片识别**:配置 `STUDY_VISION_API_KEY`(智谱 Coding Plan Key,默认模型 `glm-4.6v`;未设时回退 `STUDY_SEARCH_API_KEY`)后,问答可附带一张 png/jpg/webp 图片(≤5MB,支持点击选择或直接粘贴截图),识别文字仅作回答背景、不产生引用编号;图片字节不落盘,消息记录只保留识别文本。
 - **内置图解工具**:agent 判断流程、结构或层级关系难以用文字讲清时,自主调用 `draw_diagram` 生成 mermaid 流程图/思维导图(每答最多 3 张,内容由检索证据约束),随回答一起展示与保存。
 - **运行日志与反馈统计**:问答 / 索引 / 联网调用逐条留痕(保留 3 天),满意 / 不满意评价沉淀为周期统计。
 
@@ -155,6 +156,7 @@ python -m study
 | `STUDY_LLM_FALLBACK_*` | 可选备用模型;仅首个可见增量前切换 |
 | `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | 可选向量服务(OpenAI 兼容 `/embeddings`);更换模型后需重新索引 |
 | `STUDY_SEARCH_API_KEY` | 可选联网搜索:默认走智谱工具接口(`web-search-pro`,普通智谱 API Key 即可);设置 `STUDY_SEARCH_MCP_URL` 改走远程 MCP(需套餐专用 Key),`STUDY_SEARCH_BASE_URL` 可覆写接口地址;不配置则完全书内 |
+| `STUDY_VISION_API_KEY` | 可选图片识别(智谱 `glm-4.6v` 视觉模型,走 Coding Plan 套餐);未设时回退 `STUDY_SEARCH_API_KEY`;`STUDY_VISION_MODEL` / `STUDY_VISION_BASE_URL` 可覆写模型与地址;图片仅当次请求内识别后即弃 |
 | `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | 注册策略:开放注册 / 一码一户测试码 / 邀请码 |
 | `STUDY_ADMIN_KEY` | 可选部署者密钥;设置后可用 `GET /api/admin/test-codes`(请求头 `X-Admin-Key`)查看测试码绑定报告,未设置或不匹配返回 404 |
 | `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | 默认 100 账户 / 每账户 20 本教材 |

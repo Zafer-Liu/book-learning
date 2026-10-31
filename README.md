@@ -125,6 +125,7 @@ flowchart LR
 - **Reading position memory** — per-account positions sync across devices, with a local fallback; the shelf shows where to resume. Book headers show conversation/question/annotation stats.
 - **Compaction + context meter** — as in Diagram 3.
 - **Opt-in web supplement** — appears only when `STUDY_SEARCH_API_KEY` is set (defaults to Zhipu's `web-search-pro` tools API — any ordinary Zhipu key works; a remote MCP is also supported), off by default; as in Diagram 2, only model-distilled search terms ever leave the server.
+- **Opt-in image recognition** — appears only when `STUDY_VISION_API_KEY` (or `STUDY_SEARCH_API_KEY` as fallback) is set: a QA question may attach one png/jpg/webp (≤5MB) via the attach button or a direct paste; the transcription is injected as untrusted background context — never citable evidence — and the image bytes are discarded right after recognition.
 - **Built-in diagram tool** — when a process, structure or hierarchy is hard to convey in prose, the agent calls `draw_diagram` on its own to attach mermaid flowcharts/mindmaps (max 3 per answer, content bound to the retrieved evidence); they render inline and persist with the answer.
 - **Logs & feedback stats** — per-call traces (3-day retention); ratings fold into fixed-period statistics.
 
@@ -155,6 +156,7 @@ Open `http://127.0.0.1:8080`. Regression tests: `python -m unittest discover -s 
 | `STUDY_LLM_FALLBACK_*` | Optional fallback model; switching happens only before the first visible delta |
 | `STUDY_EMBED_BASE_URL` / `STUDY_EMBED_API_KEY` / `STUDY_EMBED_MODEL` | Optional embeddings (OpenAI-compatible `/embeddings`); reindex after changing the model |
 | `STUDY_SEARCH_API_KEY` | Optional web search: defaults to Zhipu's tools API (`web-search-pro`, any ordinary Zhipu API key works); set `STUDY_SEARCH_MCP_URL` to use a remote MCP instead (plan-specific key), `STUDY_SEARCH_BASE_URL` overrides the endpoint; unset = strictly book-scoped |
+| `STUDY_VISION_API_KEY` | Optional image recognition (Zhipu `glm-4.6v`, billed to the GLM Coding Plan); falls back to `STUDY_SEARCH_API_KEY` when unset; `STUDY_VISION_MODEL` / `STUDY_VISION_BASE_URL` override model/endpoint; attached images are recognized once and never stored |
 | `STUDY_REGISTRATION_OPEN` / `STUDY_TEST_CODES` / `STUDY_INVITE_CODE` | Registration policy: open signup / one-code-one-account / invite code |
 | `STUDY_ADMIN_KEY` | Optional deployer key; when set, `GET /api/admin/test-codes` (header `X-Admin-Key`) reports code bindings; unset or wrong key returns 404 |
 | `STUDY_MAX_USERS` / `STUDY_MAX_BOOKS` | Defaults: 100 accounts / 20 books per account |

@@ -138,6 +138,13 @@ class WebSearchClient:
             headers["Mcp-Session-Id"] = self._mcp_session
         with self.session.post(self.url, json=payload, headers=headers,
                                timeout=(5, 40), allow_redirects=False) as response:
+            # Streamable-HTTP servers return the session id as a response
+            # header (e.g. Zhipu: the initialize body has no sessionId field),
+            # and reject tools/call without it as unauthenticated.
+            if not self._mcp_session:
+                captured = _text(response.headers.get("Mcp-Session-Id") or "", 200)
+                if captured:
+                    self._mcp_session = captured
             if response.status_code == 404 and self._mcp_session:
                 # Spec signal for an expired server session: re-initialize.
                 raise _SessionExpired("MCP session expired")
@@ -322,6 +329,12 @@ class WebSearchClient:
                     continue
                 try:
                     decoded = json.loads(text)
+                    # Some servers (Zhipu) double-encode: the text block is a
+                    # JSON string wrapping another JSON document. Unwrap until
+                    # it stops being a string; a non-JSON inner value falls
+                    # back to the raw text below.
+                    while isinstance(decoded, str):
+                        decoded = json.loads(decoded)
                 except ValueError:
                     texts.append(text)  # free-form text, kept as one snippet
                     continue

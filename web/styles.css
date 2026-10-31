@@ -290,6 +290,13 @@ h1, h2, h3, p { margin: 0; }
 @keyframes popover-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 .selection-chip { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; padding: 5px 10px; border: 1px dashed #c9b98a; border-radius: 6px; background: var(--warning-bg); color: var(--warning); font-size: 10px; line-height: 1.6; }
 .selection-chip span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-chip { border-style: solid; border-color: #a9bfdc; background: var(--blue-soft); color: var(--blue); }
+.image-note { margin-top: 6px; font-size: 10px; color: var(--muted); }
+.image-note summary { cursor: pointer; user-select: none; line-height: 1.7; }
+.image-note summary:hover { color: var(--ink); }
+.image-text { margin: 6px 0 2px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 6px; background: var(--paper); font: 10px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto; }
+button.image-attach { border: 0; background: transparent; font-size: 11px; padding: 0; }
+button.image-attach:disabled { opacity: .45; cursor: default; }
 .web-toggle select { border: 1px solid var(--line); border-radius: 4px; background: var(--white); font-size: 11px; padding: 2px 4px; color: var(--ink); }
 .demo-toggle { display: block; margin: 10px auto 0; }
 .demo-box { margin-top: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--white); }

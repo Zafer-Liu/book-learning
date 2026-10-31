@@ -7,7 +7,7 @@ const state = {
   pending: false, loading: false, registering: false, registrationOpen: false,
   testCodeRegistration: false, apiKeySet: false, controllers: new Set(), poll: null,
   statusText: '', typing: null, streamText: '', searchSteps: [], context: null,
-  category: 'textbook', editingGroup: null, pendingSelection: null, bookStats: null,
+  category: 'textbook', editingGroup: null, pendingSelection: null, pendingImage: null, bookStats: null,
   reviewDueTotal: 0, reviewScopeBookId: null,
 };
 const modeNames = { qa: '教材问答', explain: '章节讲解', outline: '要点梳理', quiz: '自测练习' };
@@ -579,6 +579,7 @@ function updateComposer() {
   const ready = state.book?.status === 'ready' && !state.loading;
   const options = modeOptions[state.mode];
   const webAvailable = state.mode === 'qa' && Boolean(state.config?.web_search_configured);
+  const imageAvailable = state.mode === 'qa' && Boolean(state.config?.vision_configured);
   $('#question').disabled = !ready || state.pending;
   $('#question').placeholder = options.placeholder;
   $('#send').disabled = !ready || state.pending || !state.config?.llm_configured;
@@ -588,6 +589,8 @@ function updateComposer() {
   $('#section-select').disabled = !ready || state.pending;
   $('#web-toggle-label').hidden = !webAvailable;
   $('#web-search-toggle').disabled = !ready || state.pending || !webAvailable;
+  // Dropping out of scope (mode switch, config change) unstages the image.
+  if (!imageAvailable && state.pendingImage) { state.pendingImage = null; renderImageChip(); }
   $('#scope-label').textContent = ready ? `学习范围：${$('#section-select').value || state.book.title}` : '先选择一本完成索引的教材';
   $('#mode-title').textContent = modeNames[state.mode];
   $('#mode-description').textContent = options.help;
@@ -595,12 +598,16 @@ function updateComposer() {
   $('#mode-scope-hint').textContent = state.mode === 'qa'
     ? (isGroup ? '在组内论文中查找，引用会注明来源。' : '可先选择章节，缩小查找范围。')
     : `${isGroup ? '从组内文献选段' : '按所选章节取材，未选章节则从全书选段'}；留空点击「${options.action}」即可开始，不代表完整覆盖。`;
-  $('#composer-note').textContent = webAvailable && $('#web-search-toggle').checked
-    ? '回答以当前教材为主 · 勾选联网后 W 标注内容来自网络，需自行核实 · 引用仍需核对'
-    : '仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见';
+  $('#composer-note').textContent = state.pendingImage
+    ? '图片内容仅作背景补充 · 识别文字可能有误，需自行核对 · 回答仍以当前教材为依据'
+    : webAvailable && $('#web-search-toggle').checked
+      ? '回答以当前教材为主 · 勾选联网后 W 标注内容来自网络，需自行核实 · 引用仍需核对'
+      : '仅依据当前教材片段回答 · 引用仍需核对 · 法律教材不代表现行法律或个人法律意见';
   $('#new-conversation').disabled = !ready || state.pending;
   $('#conversation-select').disabled = !ready || state.pending;
   $('#delete-conversation').disabled = !ready || !state.conversation || state.pending;
+  $('#image-attach').hidden = !imageAvailable;
+  $('#image-attach').disabled = !ready || state.pending;
   // Quiz tuning controls appear only in quiz mode.
   const quizOn = state.mode === 'quiz' && !isGroup;
   $('#quiz-count-field').hidden = !quizOn;
@@ -628,6 +635,29 @@ function askAboutSelection(selection) {
   panel('study');
   $('#question').value = '';
   $('#question').focus();
+}
+
+// Image attachment for the next question; read as a data URL, recognized
+// server-side once, never stored — only the transcription comes back.
+function renderImageChip() {
+  const chip = $('#image-chip');
+  if (!state.pendingImage) { chip.hidden = true; return; }
+  chip.hidden = false;
+  $('#image-chip-text').textContent = `📎 将附带图片：${state.pendingImage.name}`;
+}
+
+function attachImage(file) {
+  if (!file) return;
+  if (!/\.(png|jpe?g|webp)$/i.test(file.name)) { toast('仅支持 png / jpg / webp 图片'); return; }
+  if (file.size > 5 * 1024 * 1024) { toast('图片须在 5MB 以内'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.pendingImage = { data: reader.result, name: file.name };
+    renderImageChip();
+    updateComposer();
+  };
+  reader.onerror = () => toast('图片读取失败，请重试');
+  reader.readAsDataURL(file);
 }
 
 function renderBook() {
@@ -1241,7 +1271,20 @@ function renderMessages() {
     const heading = element('div', 'message-head');
     heading.append(element('strong', '', message.role === 'user' ? '你' : '书内'), element('span', '', modeNames[message.mode] || '教材问答'));
     article.append(heading);
-    if (message.role === 'user') article.append(element('div', 'message-body', message.content));
+    if (message.role === 'user') {
+      article.append(element('div', 'message-body', message.content));
+      // Attachment note: the image itself is never stored, only the
+      // transcription (or the failure note) kept on the message record.
+      const image = message.image;
+      if (image) {
+        const details = element('details', 'image-note');
+        details.append(element('summary', '', image.error
+          ? `📎 图片「${image.name}」识别失败，已按无图回答`
+          : `📎 已识别图片「${image.name}」`));
+        if (image.text) details.append(element('pre', 'image-text', image.text));
+        article.append(details);
+      }
+    }
     else if (!message.grounded) article.append(element('div', 'no-evidence', message.content));
     else if (state.typing?.message === message) renderAssistantBody(article, message, state.typing.reveal);
     else renderAssistantBody(article, message, null);
@@ -1596,15 +1639,23 @@ $('#chat-form').addEventListener('submit', async (event) => {
       state.conversations.unshift(data.conversation);
     }
     const cid = state.conversation.id;
-    // Reader selections and quiz tuning ride along on this question only.
+    // Reader selections, the staged image and quiz tuning ride along on this
+    // question only. The image data URL is consumed server-side and never
+    // persisted — history keeps just the transcription.
     const payload = { message: question, mode, section, web: $('#web-search-toggle').checked };
     if (state.pendingSelection) payload.selection = state.pendingSelection;
+    if (mode === 'qa' && state.pendingImage) {
+      payload.image = { data: state.pendingImage.data, name: state.pendingImage.name };
+      optimistic.image = { name: state.pendingImage.name, text: '' };
+    }
     if (mode === 'quiz') {
       payload.quiz_count = Number($('#quiz-count').value) || 3;
       payload.quiz_level = $('#quiz-level').value;
     }
     state.pendingSelection = null;
     renderSelectionChip();
+    state.pendingImage = null;
+    renderImageChip();
     await streamChat(`/api/books/${bookId}/conversations/${cid}/messages`, payload, (evt) => {
       if (epoch !== state.epoch) return;
       if (evt.type === 'status') {
@@ -1799,6 +1850,34 @@ if (window.mermaid) {
 $('#selection-chip-remove').addEventListener('click', () => {
   state.pendingSelection = null;
   renderSelectionChip();
+});
+$('#image-attach').addEventListener('click', () => $('#image-input').click());
+$('#image-input').addEventListener('change', (event) => {
+  attachImage(event.target.files && event.target.files[0]);
+  event.target.value = ''; // allow re-picking the same file after removing the chip
+});
+$('#image-chip-remove').addEventListener('click', () => {
+  state.pendingImage = null;
+  renderImageChip();
+  updateComposer();
+});
+// Pasting a screenshot stages it exactly like the attach button; plain-text
+// pastes never hit this path and stay fully native.
+$('#question').addEventListener('paste', (event) => {
+  const item = Array.from((event.clipboardData && event.clipboardData.items) || [])
+    .find((entry) => entry.kind === 'file' && entry.type.startsWith('image/'));
+  if (!item) return;
+  if (!state.config?.vision_configured) return; // feature absent on this deployment
+  if (state.mode !== 'qa') { toast('图片附件仅在教材问答模式下可用'); return; }
+  const blob = item.getAsFile();
+  if (!blob) return;
+  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[blob.type];
+  if (!ext) { toast('仅支持 png / jpg / webp 图片'); return; }
+  event.preventDefault(); // the image is staged below, not inserted as text
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, '0');
+  const stamp = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  attachImage(new File([blob], `pasted-${stamp}.${ext}`, { type: blob.type }));
 });
 async function exportCards() {
   if (!state.book) return;

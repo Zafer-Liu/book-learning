@@ -1,5 +1,7 @@
 """Single-worker Railway service with account and book scoped RAG."""
 
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -32,6 +34,7 @@ from .rag import EmbeddingClient, index_tokens, retrieve, semantic_sentence_rang
 from .reader import register_reader_routes
 from .tutor import MODES, Tutor, TutorError
 from .websearch import WebSearchClient, WebSearchError
+from .vision import VisionClient, VisionError
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
@@ -110,6 +113,7 @@ def create_app(test_config=None):
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     database = Database(root)
     embedder, tutor, searcher = EmbeddingClient(), Tutor(), WebSearchClient()
+    visioner = VisionClient()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="book-index")
     index_slots = threading.BoundedSemaphore(4)
     model_slots = threading.BoundedSemaphore(2)
@@ -119,7 +123,7 @@ def create_app(test_config=None):
     compact_circuits = {}
     rate_buckets = defaultdict(deque)
     app.extensions.update(database=database, embedder=embedder, tutor=tutor, web_search=searcher,
-                          index_executor=executor)
+                          vision=visioner, index_executor=executor)
 
     def lock_for(mapping, key):
         with guard:
@@ -426,6 +430,7 @@ def create_app(test_config=None):
         return jsonify(llm_configured=tutor.configured, embedding_configured=embedder.configured,
                        embedding_backend="cloud" if embedder.configured else "lexical+fts5",
                        web_search_configured=searcher.configured,
+                       vision_configured=visioner.configured,
                        max_upload_mb=20, formats=sorted(FORMATS))
 
     @app.get("/api/admin/test-codes")
@@ -1410,6 +1415,26 @@ def create_app(test_config=None):
                     or not isinstance(selection.get("section", ""), str) or len(selection.get("section", "")) > 200:
                 abort(400, description="选文上下文无效。")
             selection = {"quote": selection["quote"].strip(), "section": (selection.get("section") or "").strip()[:200]}
+        # Image attachment: a base64 data URL recognized once per message; the
+        # bytes ride this request only and are never stored anywhere.
+        image = data.get("image")
+        image_data, image_name = "", ""
+        if image is not None:
+            if not visioner.configured or mode != "qa":
+                abort(400, description="当前部署或模式不支持图片附件。")
+            if not isinstance(image, dict) or not isinstance(image.get("data"), str) \
+                    or not isinstance(image.get("name", ""), str) or len(image.get("name", "")) > 120:
+                abort(400, description="图片附件无效。")
+            match = re.fullmatch(r"data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)", image["data"])
+            if not match:
+                abort(400, description="仅支持 png / jpg / webp 图片。")
+            try:
+                raw_bytes = base64.b64decode(match.group(2), validate=True)
+            except (ValueError, binascii.Error):
+                abort(400, description="图片数据无法解码。")
+            if not raw_bytes or len(raw_bytes) > 5 * 1024 * 1024:
+                abort(400, description="图片须在 5MB 以内。")
+            image_data, image_name = image["data"], re.split(r"[\\/]", image.get("name", ""))[-1].strip()[:120]
         owner = g.user["id"]
         with database.connect() as db:
             book = book_row(db, book_id)
@@ -1532,6 +1557,29 @@ def create_app(test_config=None):
                 user_key = g.user.get("api_key") or ""
                 hit_count, retrieve_ms = 0, 0
                 retrieval = {}
+                # Image recognition runs before any generation path so both the
+                # agent loop and the classic fallback see the same context; a
+                # failure downgrades to an image-less answer instead of one.
+                image_text, image_error = "", ""
+                if image_data:
+                    yield sse({"type": "status", "stage": "image", "text": "正在识别图片内容…"})
+                    try:
+                        throttle(("vision", owner), 30, 3600)
+                        image_text = visioner.recognize(image_data)
+                    except HTTPException as exc:
+                        image_error = str(exc.description)[:120]
+                    except VisionError as exc:
+                        image_error = str(exc)[:160]
+                    if image_error:
+                        LOG.warning("image recognition failed: %s", image_error)
+                        add_log("vision", level="warning",
+                                detail=f"图片识别失败 · {image_error} · 问: {question[:40]}", owner_id=owner)
+                        yield sse({"type": "status", "stage": "image",
+                                   "text": f"图片识别失败，已按无图继续：{image_error}"})
+                    else:
+                        add_log("vision", detail=f"图片识别成功 {len(image_text)} 字 · 问: {question[:40]}",
+                                owner_id=owner)
+                        yield sse({"type": "status", "stage": "image", "text": "已识别图片内容"})
                 try:
                     generate_started = time.monotonic()
                     # Concrete explain/outline questions run the agentic loop
@@ -1573,7 +1621,8 @@ def create_app(test_config=None):
                                                                   previous, retrieval, user_key, summary,
                                                                   run_web_search if web_enabled else None,
                                                                   is_group=is_group, quiz_count=quiz_count,
-                                                                  quiz_level=quiz_level, selection=selection):
+                                                                  quiz_level=quiz_level, selection=selection,
+                                                                  image_text=image_text):
                                 if kind == "search":
                                     # Every tool call becomes a visible UI step,
                                     # a dedicated log row and persisted metadata.
@@ -1663,7 +1712,8 @@ def create_app(test_config=None):
                                 for kind, value in tutor.generate_stream(question, mode, book["title"], result["hits"],
                                                                          previous, retrieval, user_key, generation_summary,
                                                                          is_group=is_group, quiz_count=quiz_count,
-                                                                         quiz_level=quiz_level, selection=selection):
+                                                                         quiz_level=quiz_level, selection=selection,
+                                                                         image_text=image_text):
                                     if kind == "delta":
                                         streamed = True
                                         yield sse({"type": "delta", "text": value})
@@ -1675,11 +1725,13 @@ def create_app(test_config=None):
                                 # Streaming failed before any text arrived; retry one-shot.
                                 answer = tutor.generate(question, mode, book["title"], result["hits"], previous,
                                                         retrieval, user_key, generation_summary, is_group=is_group,
-                                                        quiz_count=quiz_count, quiz_level=quiz_level, selection=selection)
+                                                        quiz_count=quiz_count, quiz_level=quiz_level, selection=selection,
+                                                        image_text=image_text)
                         else:
                             answer = tutor.generate(question, mode, book["title"], result["hits"], previous,
                                                     retrieval, user_key, generation_summary, is_group=is_group,
-                                                    quiz_count=quiz_count, quiz_level=quiz_level, selection=selection)
+                                                    quiz_count=quiz_count, quiz_level=quiz_level, selection=selection,
+                                                    image_text=image_text)
                 except TutorError as exc:
                     add_log("chat_error", level="error",
                             detail=f"生成失败 · {str(exc)[:200]} · 问: {question[:60]}", owner_id=owner)
@@ -1694,6 +1746,13 @@ def create_app(test_config=None):
                     answer["notice"] = (f"本次按当前范围的位置抽取 {hit_count}/{len(chunks)} 段原文辅助学习（最多 6 段），"
                                         "不代表完整覆盖当前范围、全章、全书或文献组。")
                 user_message = {"id": uid(), "role": "user", "content": question, "mode": mode, "created_at": now()}
+                if image_data:
+                    # The image bytes are already gone; only the transcription
+                    # (and the failure note, if any) survives on the record.
+                    attachment = {"name": image_name or "image", "text": image_text}
+                    if image_error:
+                        attachment["error"] = image_error
+                    user_message["image"] = attachment
                 answer.update(id=uid(), role="assistant", mode=mode, created_at=now())
                 # Persist before delivering: if the client disconnected, the answer still lands.
                 with database.connect() as db:
@@ -1712,8 +1771,9 @@ def create_app(test_config=None):
                                  else f"命中 {hit_count} 段")
                 searches_note = f" · 自主检索 {retrieval['searches']} 次" if retrieval.get("searches") else ""
                 web_note = f" · 联网 {retrieval['web_searches']} 次" if retrieval.get("web_searches") else ""
+                image_note = " · 附图识别" if image_data else ""
                 add_log("chat", level="warning" if retrieval["degraded"] else "info",
-                        detail=(f"《{book['title']}》· {channel} · {material_note}{searches_note}{web_note} · "
+                        detail=(f"《{book['title']}》· {channel} · {material_note}{searches_note}{web_note}{image_note} · "
                                 f"{'选段' if overview else '检索'} {retrieve_ms}ms · "
                                 f"生成 {retrieval.get('generate_ms', 0) / 1000:.1f}s · 问: {question[:60]}"),
                         owner_id=owner)
