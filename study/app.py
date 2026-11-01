@@ -605,7 +605,8 @@ def create_app(test_config=None):
 
         def run_search(agent_query, limit):
             word_list = terms(agent_query)
-            return retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit)["hits"]
+            return retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit,
+                            reranker=reranker)["hits"]
 
         def stream():
             try:
