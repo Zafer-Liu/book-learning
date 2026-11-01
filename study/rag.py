@@ -106,6 +106,45 @@ class EmbeddingClient:
         return vectors, fingerprint
 
 
+class RerankClient:
+    """Optional cross-encoder reranker (Cohere-style /v1/rerank).
+
+    The fused candidate list is cheap and noisy; a cross-encoder re-reads each
+    (query, passage) pair and gives a much sharper order. Unconfigured or
+    unavailable service leaves the RRF order untouched.
+    """
+
+    def __init__(self):
+        self.base = os.getenv("STUDY_RERANK_BASE_URL", "").strip()
+        self.key = os.getenv("STUDY_RERANK_API_KEY", "").strip()
+        self.model = (os.getenv("STUDY_RERANK_MODEL") or "bge-reranker-v2-m3").strip()
+        self.configured = bool(self.base and self.model)
+        self.session = requests.Session()
+
+    def rerank(self, query: str, documents: list[str]) -> list[float] | None:
+        if not self.configured or not documents:
+            return None
+        url = api_url(self.base, "rerank")
+        headers = {"Content-Type": "application/json"}
+        if self.key:
+            headers["Authorization"] = "Bearer " + self.key
+        try:
+            with self.session.post(
+                url,
+                json={"model": self.model, "query": query, "documents": documents,
+                      "top_n": len(documents)},
+                headers=headers, timeout=(10, 30), allow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                results = response.json()["results"]
+            scores = [0.0] * len(documents)
+            for item in results:
+                scores[int(item["index"])] = float(item["relevance_score"])
+            return scores
+        except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("重排服务暂不可用，已保留融合排序。") from exc
+
+
 def lexical_score(query: str, text: str) -> float:
     query_terms = terms(query)
     if not query_terms:
@@ -125,7 +164,7 @@ def lexical_score(query: str, text: str) -> float:
 
 
 def retrieve(query: str, chunks: list[dict], fts_ids: list[int], embedder: EmbeddingClient,
-             limit=6, gate_hook=None) -> dict:
+             limit=6, gate_hook=None, reranker: "RerankClient | None" = None) -> dict:
     if not chunks:
         return {"hits": [], "backend": "lexical+fts5", "degraded": True}
     allowed = {chunk["id"]: chunk for chunk in chunks}
@@ -156,10 +195,24 @@ def retrieve(query: str, chunks: list[dict], fts_ids: list[int], embedder: Embed
     candidates = [key for key, score in scores.items()
                   if score >= threshold or vector_scores.get(key, 0) >= 0.72]
     candidates.sort(key=lambda key: (-scores[key], -vector_scores.get(key, 0), key))
+    # RRF is a recall stage: keep a wider pool for the cross-encoder, which is
+    # far better at separating near-duplicate options than the bi-encoder.
+    rerank_scores = {}
+    if reranker is not None and reranker.configured and candidates:
+        pool = candidates[:limit * 3]
+        try:
+            values = reranker.rerank(query, [allowed[key]["text"] for key in pool])
+        except ValueError:
+            values = None
+        if values and len(values) == len(pool):
+            rerank_scores = dict(zip(pool, values))
+            candidates = sorted(pool, key=lambda key: (-rerank_scores[key], -scores[key], key))
     hits = []
     for key in candidates[:limit]:
         hit = {k: v for k, v in allowed[key].items() if k not in {"embedding", "embedding_space"}}
         hit.update(rrf_score=scores[key], lexical_score=lexical[key], vector_score=vector_scores.get(key, 0))
+        if key in rerank_scores:
+            hit["rerank_score"] = rerank_scores[key]
         hits.append(hit)
     # Jev quality gate (P1): best-effort relevance/injection filter over the
     # fused candidates. Unconfigured, down, or misbehaving -> hits untouched.

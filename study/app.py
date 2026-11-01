@@ -30,7 +30,7 @@ from .compaction import (
 )
 from .database import BUILTIN_OWNER, Database, public_book, public_message, public_reading_progress
 from .documents import FORMATS, PARSER_VERSION, parse_document, split_sections
-from .rag import EmbeddingClient, index_tokens, retrieve, semantic_sentence_ranges, terms
+from .rag import EmbeddingClient, RerankClient, index_tokens, retrieve, semantic_sentence_ranges, terms
 from .reader import register_reader_routes
 from .tutor import MODES, Tutor, TutorError
 from .websearch import WebSearchClient, WebSearchError
@@ -113,6 +113,7 @@ def create_app(test_config=None):
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     database = Database(root)
     embedder, tutor, searcher = EmbeddingClient(), Tutor(), WebSearchClient()
+    reranker = RerankClient()
     visioner = VisionClient()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="book-index")
     index_slots = threading.BoundedSemaphore(4)
@@ -428,6 +429,7 @@ def create_app(test_config=None):
     @app.get("/api/config")
     def config():
         return jsonify(llm_configured=tutor.configured, embedding_configured=embedder.configured,
+                       rerank_configured=reranker.configured,
                        embedding_backend="cloud" if embedder.configured else "lexical+fts5",
                        web_search_configured=searcher.configured,
                        vision_configured=visioner.configured,
@@ -1596,6 +1598,7 @@ def create_app(test_config=None):
                             word_list = terms(agent_query)
                             agent_state["word_set"].update(word_list)
                             result = retrieve(agent_query, chunks, fts_lookup(word_list), embedder, limit=limit,
+                                              reranker=reranker,
                                               gate_hook=lambda event, level, detail: add_log(
                                                   event, level=level,
                                                   detail=detail + f" · 问: {question[:40]}", owner_id=owner))
@@ -1687,6 +1690,7 @@ def create_app(test_config=None):
                                 result["hits"] = [chunks[index] for index in indices]
                         else:
                             result = retrieve(query, chunks, fts_lookup(search_terms), embedder,
+                                              reranker=reranker,
                                               gate_hook=lambda event, level, detail: add_log(
                                                   event, level=level,
                                                   detail=detail + f" · 问: {question[:40]}", owner_id=owner))
