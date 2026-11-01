@@ -199,7 +199,7 @@ def retrieve(query: str, chunks: list[dict], fts_ids: list[int], embedder: Embed
     # far better at separating near-duplicate options than the bi-encoder.
     rerank_scores = {}
     if reranker is not None and reranker.configured and candidates:
-        pool = candidates[:limit * 3]
+        pool = candidates[:limit * 2]
         try:
             values = reranker.rerank(query, [allowed[key]["text"] for key in pool])
         except ValueError:
